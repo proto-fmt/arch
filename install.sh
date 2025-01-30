@@ -1,219 +1,328 @@
-#!/bin/bash
-# Description: Arch Linux installation script
-# Usage: ./install.sh
-# Requirements: Running from Arch Linux live environment with internet connection
-# Author: Your Name
-# License: MIT
-
+#!/usr/bin/env bash
 set -euo pipefail
 IFS=$'\n\t'
 
-# Color Configuration
-RED=$(tput setaf 1)
-GREEN=$(tput setaf 2)
-CYAN=$(tput setaf 6)
-YELLOW=$(tput setaf 3)
-NC=$(tput sgr0)
+# Color definitions
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
 
-# Helpers functions
-info() { echo -e "${CYAN}[INFO] ${NC}$1"; }
-error() { echo -e "${RED}[FAIL] ${NC}$1"; exit 1; }
-success() { echo -e "${GREEN}[OK] ${NC}$1"; }
-warning() { echo -e "${YELLOW}[WARN] ${NC}$1"; }
+# Initial configuration defaults
+DISK=""
+ROOT_SIZE=""
+SWAP_SIZE=0
+HOME_SIZE=""
+HOSTNAME="archlinux"
+TIMEZONE="Europe/London"
+LOCALE="en_US.UTF-8"
+KEYMAP="us"
+NETWORKMANAGER=true
+SSH=false
+GPU_DRIVER="none"
+EXTRA_PACKAGES=""
+MICROCODE=""
 
-# Global variables
-declare DISK=""
-declare -r MIN_ROOT_SIZE=20
-declare -r BOOT_SIZE=1
-declare -r SCRIPT_VERSION="2.0"
+# Output functions
+error() { echo -e "${RED}[ERROR]${NC} $1" >&2; exit 1; }
+warning() { echo -e "${YELLOW}[WARNING]${NC} $1"; }
+info() { echo -e "${GREEN}[INFO]${NC} $1"; }
+question() { echo -e "${BLUE}[?]${NC} $1"; }
 
-# Cleanup handler
-cleanup() {
-    info "Cleaning up..."
-    if mountpoint -q /mnt; then
-        umount -R /mnt || warning "Failed to unmount partitions"
-    fi
-    if [ -n "${DISK}" ]; then
-        swapoff "${DISK}2" 2>/dev/null || true
-    fi
+# Check root privileges
+check_root() {
+    [[ $EUID -eq 0 ]] || error "This script must be run as root!"
 }
 
-# Error handler
-trap 'cleanup; error "Script terminated unexpectedly"' EXIT INT TERM
-trap 'error "Error on line $LINENO"' ERR
-
-# Check requirements
-check_requirements() {
-    [ "$(id -u)" -eq 0 ] || error "Script must be run as root"
-    timedatectl status &>/dev/null || error "Timedatectl not available"
-    ping -c 1 archlinux.org &>/dev/null || error "No internet connection"
-}
-
-# Check UEFI boot
-check_uefi() {
-    [ -d /sys/firmware/efi/ ] || error "UEFI not detected"
-    local fw_size
-    fw_size=$(cat /sys/firmware/efi/fw_platform_size 2>/dev/null)
-    success "UEFI ${fw_size}-bit detected"
+# Main menu
+main_menu() {
+    clear
+    echo -e "\n${GREEN}Arch Linux Installer${NC}"
+    echo -e "=======================\n"
+    echo "1. Select Disk (${GREEN}${DISK}${NC})"
+    echo "2. Partition Configuration"
+    echo "3. System Settings"
+    echo "4. Package Selection"
+    echo "5. Review Configuration"
+    echo "6. Start Installation"
+    echo -e "\n0. Exit"
+    
+    read -p "$(question "Enter your choice: ")" choice
+    case $choice in
+        1) select_disk;;
+        2) partition_menu;;
+        3) system_settings_menu;;
+        4) package_menu;;
+        5) review_configuration;;
+        6) start_installation;;
+        0) exit 0;;
+        *) warning "Invalid option!"; sleep 1; main_menu;;
+    esac
 }
 
 # Disk selection
 select_disk() {
-    info "Available disks:"
-    lsblk -ndo NAME,SIZE,TYPE,MODEL | grep -Ev 'loop|rom|sr'
+    clear
+    echo -e "\n${GREEN}Available disks:${NC}"
+    lsblk -d -n -l -o NAME,SIZE,TYPE | grep -v 'loop\|rom'
     
-    while :; do
-        read -rp "Enter disk name (e.g. /dev/sda): " DISK
-        DISK=${DISK%/}
-        [[ -b "$DISK" ]] && break
-        warning "Invalid disk: $DISK"
-    done
+    read -p "$(question "Enter disk device (e.g. /dev/sda): ")" DISK
+    if [[ ! -b "$DISK" ]]; then
+        warning "Invalid disk device!"
+        DISK=""
+        sleep 1
+    fi
+    main_menu
+}
 
-    if grep -q "^${DISK}" /proc/mounts; then
-        error "Disk is mounted!"
+# Partition configuration menu
+partition_menu() {
+    clear
+    echo -e "\n${GREEN}Partition Configuration${NC}"
+    echo -e "=========================\n"
+    echo "1. Root Size (${GREEN}${ROOT_SIZE}GB${NC})"
+    echo "2. Swap Configuration (${GREEN}${SWAP_SIZE}GB${NC})"
+    echo "3. Home Partition (${GREEN}${HOME_SIZE:-"Remaining space"}${NC})"
+    echo -e "\n0. Back"
+    
+    read -p "$(question "Enter your choice: ")" choice
+    case $choice in
+        1) set_root_size;;
+        2) swap_config;;
+        3) home_config;;
+        0) main_menu;;
+        *) warning "Invalid option!"; sleep 1; partition_menu;;
+    esac
+}
+
+# Set root partition size
+set_root_size() {
+    clear
+    read -p "$(question "Enter root partition size in GB (min 20): ")" ROOT_SIZE
+    if ! [[ "$ROOT_SIZE" =~ ^[0-9]+$ ]] || [[ "$ROOT_SIZE" -lt 20 ]]; then
+        warning "Invalid size! Minimum is 20GB"
+        ROOT_SIZE=""
+    fi
+    partition_menu
+}
+
+# Swap configuration
+swap_config() {
+    clear
+    read -p "$(question "Enter swap size in GB (0 to disable): ")" SWAP_SIZE
+    if ! [[ "$SWAP_SIZE" =~ ^[0-9]+$ ]]; then
+        warning "Invalid swap size!"
+        SWAP_SIZE=0
+    fi
+    partition_menu
+}
+
+# Home partition configuration
+home_config() {
+    clear
+    read -p "$(question "Enter home partition size in GB (leave empty for remaining space): ")" HOME_SIZE
+    if [[ -n "$HOME_SIZE" ]] && ! [[ "$HOME_SIZE" =~ ^[0-9]+$ ]]; then
+        warning "Invalid home size!"
+        HOME_SIZE=""
+    fi
+    partition_menu
+}
+
+# System settings menu
+system_settings_menu() {
+    clear
+    echo -e "\n${GREEN}System Settings${NC}"
+    echo -e "================\n"
+    echo "1. Hostname (${GREEN}${HOSTNAME}${NC})"
+    echo "2. Timezone (${GREEN}${TIMEZONE}${NC})"
+    echo "3. Locale (${GREEN}${LOCALE}${NC})"
+    echo "4. Keymap (${GREEN}${KEYMAP}${NC})"
+    echo -e "\n0. Back"
+    
+    read -p "$(question "Enter your choice: ")" choice
+    case $choice in
+        1) set_hostname;;
+        2) set_timezone;;
+        3) set_locale;;
+        4) set_keymap;;
+        0) main_menu;;
+        *) warning "Invalid option!"; sleep 1; system_settings_menu;;
+    esac
+}
+
+set_hostname() {
+    clear
+    read -p "$(question "Enter hostname: ")" HOSTNAME
+    system_settings_menu
+}
+
+set_timezone() {
+    clear
+    read -p "$(question "Enter timezone (e.g. Europe/London): ")" TIMEZONE
+    system_settings_menu
+}
+
+set_locale() {
+    clear
+    read -p "$(question "Enter locale (e.g. en_US.UTF-8): ")" LOCALE
+    system_settings_menu
+}
+
+set_keymap() {
+    clear
+    read -p "$(question "Enter keymap (e.g. us): ")" KEYMAP
+    system_settings_menu
+}
+
+# Package selection menu
+package_menu() {
+    clear
+    echo -e "\n${GREEN}Package Selection${NC}"
+    echo -e "==================\n"
+    echo "1. NetworkManager (${GREEN}${NETWORKMANAGER}${NC})"
+    echo "2. SSH Server (${GREEN}${SSH}${NC})"
+    echo "3. GPU Drivers (${GREEN}${GPU_DRIVER}${NC})"
+    echo "4. Extra Packages (${GREEN}${EXTRA_PACKAGES}${NC})"
+    echo -e "\n0. Back"
+    
+    read -p "$(question "Enter your choice: ")" choice
+    case $choice in
+        1) toggle_networkmanager;;
+        2) toggle_ssh;;
+        3) select_gpu_driver;;
+        4) set_extra_packages;;
+        0) main_menu;;
+        *) warning "Invalid option!"; sleep 1; package_menu;;
+    esac
+}
+
+toggle_networkmanager() {
+    $NETWORKMANAGER && NETWORKMANAGER=false || NETWORKMANAGER=true
+    package_menu
+}
+
+toggle_ssh() {
+    $SSH && SSH=false || SSH=true
+    package_menu
+}
+
+select_gpu_driver() {
+    clear
+    echo -e "\n${GREEN}Select GPU Driver${NC}"
+    echo -e "==================\n"
+    echo "1. Intel"
+    echo "2. AMD"
+    echo "3. NVIDIA"
+    echo "4. None"
+    
+    read -p "$(question "Enter your choice: ")" choice
+    case $choice in
+        1) GPU_DRIVER="intel";;
+        2) GPU_DRIVER="amd";;
+        3) GPU_DRIVER="nvidia";;
+        4) GPU_DRIVER="none";;
+        *) warning "Invalid option!";;
+    esac
+    package_menu
+}
+
+set_extra_packages() {
+    clear
+    read -p "$(question "Enter extra packages (space-separated): ")" EXTRA_PACKAGES
+    package_menu
+}
+
+# Review configuration
+review_configuration() {
+    clear
+    echo -e "\n${GREEN}Configuration Summary${NC}"
+    echo -e "======================\n"
+    echo "Disk: ${GREEN}${DISK}${NC}"
+    echo "Root Size: ${GREEN}${ROOT_SIZE}GB${NC}"
+    echo "Swap Size: ${GREEN}${SWAP_SIZE}GB${NC}"
+    echo "Home Size: ${GREEN}${HOME_SIZE:-"Remaining space"}${NC}"
+    echo "Hostname: ${GREEN}${HOSTNAME}${NC}"
+    echo "Timezone: ${GREEN}${TIMEZONE}${NC}"
+    echo "Locale: ${GREEN}${LOCALE}${NC}"
+    echo "Keymap: ${GREEN}${KEYMAP}${NC}"
+    echo "NetworkManager: ${GREEN}${NETWORKMANAGER}${NC}"
+    echo "SSH Server: ${GREEN}${SSH}${NC}"
+    echo "GPU Driver: ${GREEN}${GPU_DRIVER}${NC}"
+    echo "Extra Packages: ${GREEN}${EXTRA_PACKAGES}${NC}"
+    
+    read -p "$(question "\nPress Enter to return to main menu...")"
+    main_menu
+}
+
+# Installation process
+start_installation() {
+    clear
+    echo -e "\n${RED}WARNING: This will erase all data on ${DISK}!${NC}"
+    read -p "$(question "Are you sure you want to continue? (y/N): ")" confirm
+    [[ "$confirm" =~ [yY] ]] || main_menu
+
+    # Partitioning
+    info "Partitioning disk..."
+    parted -s "$DISK" mklabel gpt
+    parted -s "$DISK" mkpart "EFI" fat32 1MiB 1025MiB
+    parted -s "$DISK" set 1 esp on
+    parted -s "$DISK" mkpart "ROOT" ext4 1025MiB "+${ROOT_SIZE}GiB"
+    
+    if [[ $SWAP_SIZE -gt 0 ]]; then
+        parted -s "$DISK" mkpart "SWAP" linux-swap "+0%" "+${SWAP_SIZE}GiB"
+    fi
+    
+    if [[ -n "$HOME_SIZE" ]]; then
+        parted -s "$DISK" mkpart "HOME" ext4 "+0%" "+${HOME_SIZE}GiB"
+    else
+        parted -s "$DISK" mkpart "HOME" ext4 "+0%" "100%"
     fi
 
-    DISK_SIZE_GB=$(blockdev --getsize64 "$DISK" | awk '{printf "%d", $1/1024/1024/1024}')
-    success "Selected: $DISK (${DISK_SIZE_GB}GB)"
-}
-
-# Partitioning
-create_partitions() {
-    local swap_size root_size home_size
-    
-    get_sizes() {
-        local max_size=$((DISK_SIZE_GB - BOOT_SIZE))
-        
-        while :; do
-            read -rp "Swap size (GB, 0 to skip): " swap_size
-            [[ $swap_size =~ ^[0-9]+$ ]] && ((swap_size <= max_size)) && break
-            warning "Invalid swap size (0-$max_size)"
-        done
-        
-        max_size=$((max_size - swap_size))
-        while :; do
-            read -rp "Root size (GB, min $MIN_ROOT_SIZE): " root_size
-            [[ $root_size =~ ^[0-9]+$ ]] && ((root_size >= MIN_ROOT_SIZE)) && ((root_size <= max_size)) && break
-            warning "Invalid root size ($MIN_ROOT_SIZE-$max_size)"
-        done
-        
-        home_size=$((max_size - root_size))
-        ((home_size > 0)) || home_size=0
-        info "Home size: ${home_size}GB"
-    }
-
-    get_sizes
-
-    info "Partitioning ${DISK}..."
-    parted -s "$DISK" \
-        mklabel gpt \
-        mkpart "EFI" fat32 1MiB ${BOOT_SIZE}GiB \
-        set 1 esp on \
-        mkpart "SWAP" linux-swap ${BOOT_SIZE}GiB $((BOOT_SIZE + swap_size))GiB \
-        mkpart "ROOT" ext4 $((BOOT_SIZE + swap_size))GiB $((BOOT_SIZE + swap_size + root_size))GiB \
-        mkpart "HOME" ext4 $((BOOT_SIZE + swap_size + root_size))GiB 100%
-
     # Formatting
-    mkfs.fat -F32 "${DISK}1"
-    ((swap_size > 0)) && mkswap "${DISK}2"
-    mkfs.ext4 -F "${DISK}3"
-    mkfs.ext4 -F "${DISK}4"
+    info "Formatting partitions..."
+    mkfs.fat -F32 "${DISK}p1"
+    mkfs.ext4 -F "${DISK}p2"
+    [[ $SWAP_SIZE -gt 0 ]] && mkswap "${DISK}p3"
+    mkfs.ext4 -F "${DISK}$( [[ $SWAP_SIZE -gt 0 ]] && echo "p4" || echo "p3" )"
 
     # Mounting
-    mount "${DISK}3" /mnt
-    mkdir -p /mnt/{boot,home}
-    mount "${DISK}1" /mnt/boot
-    mount "${DISK}4" /mnt/home
-    ((swap_size > 0)) && swapon "${DISK}2"
-}
+    info "Mounting filesystems..."
+    mount "${DISK}p2" /mnt
+    mkdir -p /mnt/boot
+    mount "${DISK}p1" /mnt/boot
+    [[ $SWAP_SIZE -gt 0 ]] && swapon "${DISK}p3"
 
-# Base system installation
-install_packages() {
-    local packages=(base base-devel linux linux-firmware networkmanager sudo)
-    
-    case $(grep -m1 "vendor_id" /proc/cpuinfo) in
-        *Intel*) packages+=(intel-ucode) ;;
-        *AMD*)   packages+=(amd-ucode) ;;
-    esac
-
-    info "Installing: ${packages[*]}"
-    pacstrap /mnt "${packages[@]}" || error "Installation failed"
-}
-
-# System configuration
-configure_system() {
-    local hostname username root_pass user_pass
-    
-    get_input() {
-        read -rp "Hostname: " hostname
-        [[ -n "$hostname" ]] || hostname="archlinux"
-        
-        while :; do
-            read -rp "Username: " username
-            [[ "$username" =~ ^[a-z_][a-z0-9_-]*$ ]] && break
-            warning "Invalid username"
-        done
-        
-        while :; do
-            read -rsp "Root password: " root_pass
-            echo
-            ((${#root_pass} >= 8)) && break
-            warning "Minimum 8 characters"
-        done
-        
-        while :; do
-            read -rsp "User password: " user_pass
-            echo
-            ((${#user_pass} >= 8)) && break
-            warning "Minimum 8 characters"
-        done
-    }
-
-    get_input
+    # Base system installation
+    info "Installing base system..."
+    pacstrap /mnt base base-devel linux linux-firmware
 
     # Generate fstab
-    genfstab -U /mnt > /mnt/etc/fstab
+    info "Generating fstab..."
+    genfstab -U /mnt >> /mnt/etc/fstab
 
     # Chroot configuration
-    arch-chroot /mnt /bin/bash -c "
-        echo 'LANG=en_US.UTF-8' > /etc/locale.conf
-        echo 'KEYMAP=us' > /etc/vconsole.conf
-        echo '$hostname' > /etc/hostname
-        ln -sf /usr/share/zoneinfo/$(timedatectl | grep zone | awk '{print $3}') /etc/localtime
-        hwclock --systohc
-        
-        useradd -m -G wheel -s /bin/bash $username
-        echo -e '$root_pass\n$root_pass' | passwd
-        echo -e '$user_pass\n$user_pass' | passwd $username
-        
-        echo '%wheel ALL=(ALL) ALL' > /etc/sudoers.d/wheel
-        systemctl enable NetworkManager
-    " || error "Chroot configuration failed"
-
-    # Bootloader
-    arch-chroot /mnt bootctl install
-    cat <<EOF > /mnt/boot/loader/entries/arch.conf
-title Arch Linux
-linux /vmlinuz-linux
-initrd /initramfs-linux.img
-options root=PARTUUID=$(blkid -s PARTUUID -o value "${DISK}3") rw
+    info "Configuring system..."
+    arch-chroot /mnt /bin/bash <<EOF
+    ln -sf /usr/share/zoneinfo/$TIMEZONE /etc/localtime
+    hwclock --systohc
+    echo "$LOCALE UTF-8" >> /etc/locale.gen
+    locale-gen
+    echo "LANG=$LOCALE" > /etc/locale.conf
+    echo "KEYMAP=$KEYMAP" > /etc/vconsole.conf
+    echo "$HOSTNAME" > /etc/hostname
+    systemctl enable NetworkManager
+    $SSH && systemctl enable sshd
+    passwd
 EOF
+
+    info "Installation complete!"
+    echo -e "\nNext steps:"
+    echo "1. umount -R /mnt"
+    echo "2. reboot"
+    exit 0
 }
 
-main() {
-    check_requirements
-    check_uefi
-    
-    info "Arch Linux Installer v${SCRIPT_VERSION}"
-    warning "This will erase all data on selected disk!"
-    
-    select_disk
-    create_partitions
-    install_packages
-    configure_system
-    
-    cleanup
-    success "Installation complete! Reboot your system."
-}
-
-main "$@"
+# Initial checks
+check_root
+main_menu
