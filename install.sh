@@ -3,11 +3,11 @@ set -euo pipefail
 IFS=$'\n\t'
 
 # Color definitions
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+RED=$(tput setaf 1)
+GREEN=$(tput setaf 2)
+YELLOW=$(tput setaf 3)
+BLUE=$(tput setaf 4)
+NC=$(tput sgr0) # No Color
 
 # Initial configuration defaults
 DISK=""
@@ -23,6 +23,7 @@ SSH=false
 GPU_DRIVER="none"
 EXTRA_PACKAGES=""
 MICROCODE=""
+FS_TYPE="ext4" 
 
 # Output functions
 error() { echo -e "${RED}[ERROR]${NC} $1" >&2; exit 1; }
@@ -84,6 +85,7 @@ partition_menu() {
     echo "1. Root Size (${GREEN}${ROOT_SIZE}GB${NC})"
     echo "2. Swap Configuration (${GREEN}${SWAP_SIZE}GB${NC})"
     echo "3. Home Partition (${GREEN}${HOME_SIZE:-"Remaining space"}${NC})"
+    echo "4. Filesystem Type (${GREEN}${FS_TYPE}${NC})" 
     echo -e "\n0. Back"
     
     read -p "$(question "Enter your choice: ")" choice
@@ -91,11 +93,29 @@ partition_menu() {
         1) set_root_size;;
         2) swap_config;;
         3) home_config;;
+        4) set_filesystem;;
         0) main_menu;;
         *) warning "Invalid option!"; sleep 1; partition_menu;;
     esac
 }
-
+# Added filesystem type selection
+set_filesystem() {
+    clear
+    echo -e "\n${GREEN}Select Filesystem Type${NC}"
+    echo -e "=======================\n"
+    echo "1. ext4 (recommended)"
+    echo "2. btrfs"
+    echo "3. xfs"
+    
+    read -p "$(question "Enter your choice: ")" choice
+    case $choice in
+        1) FS_TYPE="ext4";;
+        2) FS_TYPE="btrfs";;
+        3) FS_TYPE="xfs";;
+        *) warning "Invalid option!";;
+    esac
+    partition_menu
+}
 # Set root partition size
 set_root_size() {
     clear
@@ -258,33 +278,38 @@ review_configuration() {
 # Installation process
 start_installation() {
     clear
+
+     # Check for required configurations
+    [[ -z "$DISK" ]] && error "Disk not selected!"
+    [[ -z "$ROOT_SIZE" ]] && error "Root size not configured!"
+
     echo -e "\n${RED}WARNING: This will erase all data on ${DISK}!${NC}"
     read -p "$(question "Are you sure you want to continue? (y/N): ")" confirm
     [[ "$confirm" =~ [yY] ]] || main_menu
 
+     # Calculate partition positions
+    EFI_END=1025MiB
+    ROOT_START=$EFI_END
+    ROOT_END="$ROOT_SIZE"GiB
+    SWAP_START=$ROOT_END
+    SWAP_END="$((SWAP_SIZE + ${ROOT_SIZE}))"GiB
+    HOME_START=$([[ $SWAP_SIZE -gt 0 ]] && echo "$SWAP_END" || echo "$ROOT_END")
+
     # Partitioning
     info "Partitioning disk..."
     parted -s "$DISK" mklabel gpt
-    parted -s "$DISK" mkpart "EFI" fat32 1MiB 1025MiB
+    parted -s "$DISK" mkpart "EFI" fat32 1MiB $EFI_END
     parted -s "$DISK" set 1 esp on
-    parted -s "$DISK" mkpart "ROOT" ext4 1025MiB "+${ROOT_SIZE}GiB"
-    
-    if [[ $SWAP_SIZE -gt 0 ]]; then
-        parted -s "$DISK" mkpart "SWAP" linux-swap "+0%" "+${SWAP_SIZE}GiB"
-    fi
-    
-    if [[ -n "$HOME_SIZE" ]]; then
-        parted -s "$DISK" mkpart "HOME" ext4 "+0%" "+${HOME_SIZE}GiB"
-    else
-        parted -s "$DISK" mkpart "HOME" ext4 "+0%" "100%"
-    fi
+    parted -s "$DISK" mkpart "ROOT" $FS_TYPE $ROOT_START $ROOT_END
+    [[ $SWAP_SIZE -gt 0 ]] && parted -s "$DISK" mkpart "SWAP" linux-swap $SWAP_START $SWAP_END
+    parted -s "$DISK" mkpart "HOME" $FS_TYPE $HOME_START 100%
 
     # Formatting
     info "Formatting partitions..."
     mkfs.fat -F32 "${DISK}p1"
-    mkfs.ext4 -F "${DISK}p2"
+    mkfs.${FS_TYPE} -F "${DISK}p2"
     [[ $SWAP_SIZE -gt 0 ]] && mkswap "${DISK}p3"
-    mkfs.ext4 -F "${DISK}$( [[ $SWAP_SIZE -gt 0 ]] && echo "p4" || echo "p3" )"
+    mkfs.${FS_TYPE} -F "${DISK}$([[ $SWAP_SIZE -gt 0 ]] && echo "p4" || echo "p3")"
 
     # Mounting
     info "Mounting filesystems..."
@@ -295,7 +320,7 @@ start_installation() {
 
     # Base system installation
     info "Installing base system..."
-    pacstrap /mnt base base-devel linux linux-firmware
+    pacstrap /mnt base base-devel linux linux-firmware linux-headers nano
 
     # Generate fstab
     info "Generating fstab..."
@@ -311,9 +336,17 @@ start_installation() {
     echo "LANG=$LOCALE" > /etc/locale.conf
     echo "KEYMAP=$KEYMAP" > /etc/vconsole.conf
     echo "$HOSTNAME" > /etc/hostname
-    systemctl enable NetworkManager
+    
+    # Configure network
+    $NETWORKMANAGER && systemctl enable NetworkManager
     $SSH && systemctl enable sshd
+    
+    # Set root password
+    echo "Set root password:"
     passwd
+    
+    # Install additional packages
+    pacman -S --noconfirm $([[ $GPU_DRIVER != "none" ]] && echo "$GPU_DRIVER-dkms $GPU_DRIVER-utils") $EXTRA_PACKAGES
 EOF
 
     info "Installation complete!"
