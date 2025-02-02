@@ -3,6 +3,19 @@ set -euo pipefail
 IFS=$'\n\t'
 
 # -------------------------------
+# Check for dialog and root
+# -------------------------------
+if [[ $EUID -ne 0 ]]; then
+    echo "This script must be run as root"
+    exit 1
+fi
+
+if ! command -v dialog >/dev/null; then
+    echo "Installing dialog..."
+    pacman -Sy --noconfirm dialog
+fi
+
+# -------------------------------
 # Global Configuration
 # -------------------------------
 declare -A CONFIG=(
@@ -22,23 +35,20 @@ declare -A CONFIG=(
     [BOOTLOADER]="grub"         # Bootloader (grub/systemd-boot)
 )
 
-declare -r -A COLOR=(
-    [RED]=$(tput setaf 1)
-    [GREEN]=$(tput setaf 2)
-    [YELLOW]=$(tput setaf 3)
-    [CYAN]=$(tput setaf 6)
-    [NC]=$(tput sgr0)
+# Detected hardware information
+declare -A DETECTED=(
+    [MICROCODE]=""
+    [GPU_DRIVER]=""
 )
 
 # Fixed installation parameters
 declare -r UEFI_SIZE=1024       # 1GB UEFI partition
 declare -r FS_TYPE="ext4"       # Filesystem type
 
-# Detected hardware information
-declare -A DETECTED=(
-    [MICROCODE]=""
-    [GPU_DRIVER]=""
-)
+# Dialog settings
+declare -r DIALOG_BACKTITLE="Arch Linux Installer"
+declare -r DIALOG_HEIGHT=20
+declare -r DIALOG_WIDTH=70
 
 # -------------------------------
 # Validation Functions
@@ -71,58 +81,29 @@ validate_keymap() {
     localectl list-keymaps | grep -qx "$1" && return 0 || return 1
 }
 
+validate_bootloader() {
+    [[ "$1" =~ ^(grub|systemd-boot)$ ]] && return 0 || return 1
+}
+
+validate_yesno() {
+    [[ "$1" =~ ^(yes|no)$ ]] && return 0 || return 1
+}
+
 validate_disk_space() {
+    [[ -z "${CONFIG[DISK_SIZE]}" ]] && return 1
     local total=$(( UEFI_SIZE + CONFIG[ROOT_SIZE] + CONFIG[HOME_SIZE] + CONFIG[SWAP_SIZE] ))
     (( total <= CONFIG[DISK_SIZE] )) && return 0 || return 1
 }
 
 # -------------------------------
-# Display Formatting Functions
-# -------------------------------
-format_value() {
-    local key=$1
-    local validator=$2
-    local value="${CONFIG[$key]}"
-    
-    if $validator "$value"; then
-        echo -e "${COLOR[GREEN]}${value}${COLOR[NC]}"
-    else
-        echo -e "${COLOR[RED]}${value:-[NOT SET]}${COLOR[NC]}"
-    fi
-}
-
-format_disk() {
-    if [[ -n "${CONFIG[DISK]}" ]]; then
-        if validate_disk "${CONFIG[DISK]}"; then
-            echo -e "${COLOR[GREEN]}${CONFIG[DISK]} (${CONFIG[DISK_SIZE]}GB)${COLOR[NC]}"
-        else
-            echo -e "${COLOR[RED]}${CONFIG[DISK]}${COLOR[NC]}"
-        fi
-    else
-        echo -e "${COLOR[RED]}[NOT SET]${COLOR[NC]}"
-    fi
-}
-
-format_detected() {
-    local value="$1"
-    local detected="$2"
-    
-    if [[ "$value" == "auto" && -n "$detected" ]]; then
-        echo -e "${COLOR[GREEN]}${detected} (autodetect)${COLOR[NC]}"
-    else
-        echo -e "${COLOR[GREEN]}${value}${COLOR[NC]}"
-    fi
-}
-
-# -------------------------------
-# Hardware Detection
+# Hardware Detection Functions
 # -------------------------------
 detect_hardware() {
-    # CPU microcode
+    # CPU microcode detection
     local cpu_vendor=$(grep -m1 -oP 'vendor_id\s*:\s*\K.*' /proc/cpuinfo)
     case $cpu_vendor in
-        *Intel*) DETECTED[MICROCODE]="intel" ;;
-        *AMD*)   DETECTED[MICROCODE]="amd" ;;
+        *Intel*) DETECTED[MICROCODE]="intel-ucode" ;;
+        *AMD*)   DETECTED[MICROCODE]="amd-ucode" ;;
     esac
 
     # GPU detection
@@ -135,51 +116,81 @@ detect_hardware() {
 }
 
 # -------------------------------
-# Configuration Menu
+# Dialog Helper Functions
+# -------------------------------
+show_message() {
+    dialog --backtitle "$DIALOG_BACKTITLE" \
+           --title "Message" \
+           --msgbox "$1" 8 60
+}
+
+show_error() {
+    dialog --backtitle "$DIALOG_BACKTITLE" \
+           --title "Error" \
+           --colors \
+           --msgbox "\Z1$1\Zn" 8 60
+}
+
+show_progress() {
+    echo "$1" | dialog --backtitle "$DIALOG_BACKTITLE" \
+                       --title "Progress" \
+                       --gauge "$2" 8 60 0
+}
+
+# -------------------------------
+# Menu Functions
 # -------------------------------
 main_menu() {
     while true; do
-        clear
-        echo -e "\n${COLOR[CYAN]}Arch Linux Installer${COLOR[NC]}"
-        echo -e "=====================\n"
+        local disk_display="${CONFIG[DISK]:-[NOT SET]}"
+        [[ -n "${CONFIG[DISK_SIZE]}" ]] && disk_display+=" (${CONFIG[DISK_SIZE]}GB)"
         
-        # Display configuration
-        printf "%2d) %-15s: %s\n" 1 "Disk" "$(format_disk)"
-        printf "%2d) %-15s: %s\n" 2 "Root Size (GB)" "$(format_value ROOT_SIZE validate_size)"
-        printf "%2d) %-15s: %s\n" 3 "Home Size (GB)" "$(format_value HOME_SIZE validate_size)"
-        printf "%2d) %-15s: %s\n" 4 "Swap Size (GB)" "$(format_value SWAP_SIZE validate_size)"
-        printf "%2d) %-15s: %s\n" 5 "Hostname" "$(format_value HOSTNAME validate_hostname)"
-        printf "%2d) %-15s: %s\n" 6 "Timezone" "$(format_value TIMEZONE validate_timezone)"
-        printf "%2d) %-15s: %s\n" 7 "Locale" "$(format_value LOCALE validate_locale)"
-        printf "%2d) %-15s: %s\n" 8 "Keymap" "$(format_value KEYMAP validate_keymap)"
-        printf "%2d) %-15s: %s\n" 9 "Username" "$(format_value USERNAME validate_username)"
-        printf "%2d) %-15s: %s\n" 10 "Sudo Access" "$(format_value ADD_SUDO validate_yesno)"
-        printf "%2d) %-15s: %s\n" 11 "Microcode" "$(format_detected "${CONFIG[MICROCODE]}" "${DETECTED[MICROCODE]}")"
-        printf "%2d) %-15s: %s\n" 12 "GPU Driver" "$(format_detected "${CONFIG[GPU_DRIVER]}" "${DETECTED[GPU_DRIVER]}")"
-        printf "%2d) %-15s: %s\n" 13 "Bootloader" "$(format_value BOOTLOADER validate_bootloader)"
+        local microcode_display="${CONFIG[MICROCODE]}"
+        [[ "$microcode_display" == "auto" ]] && microcode_display+=" (${DETECTED[MICROCODE]})"
         
-        echo -e "\n 0) Start Installation"
-        echo -e "00) Exit\n"
-        
-        read -p "$(echo -e ${COLOR[CYAN]}"Enter selection: "${COLOR[NC]})" choice
-        
+        local gpu_display="${CONFIG[GPU_DRIVER]}"
+        [[ "$gpu_display" == "auto" ]] && gpu_display+=" (${DETECTED[GPU_DRIVER]})"
+
+        local choice
+        choice=$(dialog --clear --backtitle "$DIALOG_BACKTITLE" \
+                       --title "Main Menu" \
+                       --colors \
+                       --menu "Select option to configure:" \
+                       $DIALOG_HEIGHT $DIALOG_WIDTH 13 \
+                       "1" "Disk: $disk_display" \
+                       "2" "Root Size: ${CONFIG[ROOT_SIZE]}GB" \
+                       "3" "Home Size: ${CONFIG[HOME_SIZE]}GB" \
+                       "4" "Swap Size: ${CONFIG[SWAP_SIZE]}GB" \
+                       "5" "Hostname: ${CONFIG[HOSTNAME]}" \
+                       "6" "Timezone: ${CONFIG[TIMEZONE]}" \
+                       "7" "Locale: ${CONFIG[LOCALE]}" \
+                       "8" "Keymap: ${CONFIG[KEYMAP]}" \
+                       "9" "Username: ${CONFIG[USERNAME]:-[NOT SET]}" \
+                       "10" "Sudo Access: ${CONFIG[ADD_SUDO]}" \
+                       "11" "Microcode: $microcode_display" \
+                       "12" "GPU Driver: $gpu_display" \
+                       "13" "Bootloader: ${CONFIG[BOOTLOADER]}" \
+                       "i" "Start Installation" \
+                       "q" "Exit" \
+                       2>&1 >/dev/tty)
+
         case $choice in
-            1)  select_disk ;;
-            2)  set_parameter ROOT_SIZE "Enter root partition size (GB)" validate_size ;;
-            3)  set_parameter HOME_SIZE "Enter home partition size (GB)" validate_size ;;
-            4)  set_parameter SWAP_SIZE "Enter swap size (GB)" validate_size ;;
-            5)  set_parameter HOSTNAME "Enter hostname" validate_hostname ;;
-            6)  set_timezone ;;
-            7)  set_locale ;;
-            8)  set_keymap ;;
-            9)  set_parameter USERNAME "Enter username" validate_username ;;
+            1) select_disk ;;
+            2) set_size "ROOT_SIZE" "Enter root partition size (GB)" ;;
+            3) set_size "HOME_SIZE" "Enter home partition size (GB)" ;;
+            4) set_size "SWAP_SIZE" "Enter swap size (GB)" ;;
+            5) set_hostname ;;
+            6) select_timezone ;;
+            7) select_locale ;;
+            8) select_keymap ;;
+            9) set_username ;;
             10) toggle_sudo ;;
-            11) set_microcode ;;
-            12) set_gpu_driver ;;
-            13) set_bootloader ;;
-            0)  start_installation ;;
-            00) exit 0 ;;
-            *)  echo -e "${COLOR[RED]}Invalid selection!${COLOR[NC]}" && sleep 1 ;;
+            11) select_microcode ;;
+            12) select_gpu_driver ;;
+            13) select_bootloader ;;
+            i) start_installation ;;
+            q) exit 0 ;;
+            *) continue ;;
         esac
     done
 }
@@ -188,240 +199,412 @@ main_menu() {
 # Parameter Setting Functions
 # -------------------------------
 select_disk() {
-    echo -e "\nAvailable disks:"
-    lsblk -d -n -l -o NAME,SIZE,TYPE | grep -v 'rom\|loop\|airoot' | while read -r line; do
-        echo -e "  ${COLOR[CYAN]}${line}${COLOR[NC]}"
-    done
+    local disks=($(lsblk -d -n -l -o NAME,SIZE,TYPE | grep -v 'rom\|loop\|airoot'))
+    local menu_items=()
     
-    while true; do
-        read -p "$(echo -e ${COLOR[CYAN]}"\nEnter disk (e.g. /dev/sda): "${COLOR[NC]})" disk
-        if validate_disk "$disk"; then
-            CONFIG[DISK]="$disk"
-            CONFIG[DISK_SIZE]=$(blockdev --getsize64 "$disk" | awk '{printf "%d", $1/1024/1024/1024}')
-            break
-        else
-            echo -e "${COLOR[RED]}Invalid disk!${COLOR[NC]}"
-        fi
+    for disk in "${disks[@]}"; do
+        menu_items+=("/dev/$(echo $disk | awk '{print $1}')" "$(echo $disk | awk '{print $2}')")
     done
+
+    local choice
+    choice=$(dialog --backtitle "$DIALOG_BACKTITLE" \
+                   --title "Select Disk" \
+                   --menu "Available disks:" \
+                   $DIALOG_HEIGHT $DIALOG_WIDTH 10 \
+                   "${menu_items[@]}" \
+                   2>&1 >/dev/tty)
+
+    if [[ -n "$choice" ]]; then
+        CONFIG[DISK]="$choice"
+        CONFIG[DISK_SIZE]=$(blockdev --getsize64 "$choice" | awk '{printf "%d", $1/1024/1024/1024}')
+    fi
 }
 
-set_parameter() {
+set_size() {
     local key=$1
     local prompt=$2
-    local validator=$3
     
     while true; do
-        read -p "$(echo -e ${COLOR[CYAN]}"$prompt: "${COLOR[NC]})" value
-        if $validator "$value"; then
+        local value
+        value=$(dialog --backtitle "$DIALOG_BACKTITLE" \
+                      --title "Set $key" \
+                      --inputbox "$prompt" \
+                      8 40 "${CONFIG[$key]}" \
+                      2>&1 >/dev/tty)
+        
+        [[ $? -ne 0 ]] && return
+
+        if validate_size "$value"; then
             CONFIG[$key]="$value"
-            if [[ "$key" =~ _SIZE ]] && ! validate_disk_space; then
-                echo -e "${COLOR[RED]}Total size exceeds disk capacity!${COLOR[NC]}"
+            if ! validate_disk_space; then
+                show_error "Total size exceeds disk capacity!"
                 continue
             fi
             break
         else
-            echo -e "${COLOR[RED]}Invalid value!${COLOR[NC]}"
+            show_error "Please enter a valid number"
         fi
     done
 }
 
-set_timezone() {
-    echo -e "\nAvailable timezones:"
-    timedatectl list-timezones | head -n 20
-    set_parameter TIMEZONE "Enter timezone (e.g. Europe/London)" validate_timezone
+set_hostname() {
+    while true; do
+        local value
+        value=$(dialog --backtitle "$DIALOG_BACKTITLE" \
+                      --title "Set Hostname" \
+                      --inputbox "Enter hostname:" \
+                      8 40 "${CONFIG[HOSTNAME]}" \
+                      2>&1 >/dev/tty)
+        
+        [[ $? -ne 0 ]] && return
+
+        if validate_hostname "$value"; then
+            CONFIG[HOSTNAME]="$value"
+            break
+        else
+            show_error "Invalid hostname format"
+        fi
+    done
 }
 
-set_locale() {
-    echo -e "\nAvailable locales:"
-    grep -E '^#?[a-z].*UTF-8' /etc/locale.gen | cut -d' ' -f1 | head -n 20
-    set_parameter LOCALE "Enter locale (e.g. en_US.UTF-8)" validate_locale
+# -------------------------------
+# Special Parameter Selection Functions
+# -------------------------------
+select_timezone() {
+    # Create a list of timezones
+    local zones=()
+    while IFS= read -r zone; do
+        zones+=("$zone" "")
+    done < <(find /usr/share/zoneinfo/ -type f -not -path '*right*' -not -path '*posix*' \
+             | cut -d/ -f5- | sort | grep -v "^posix/" | grep -v "^right/")
+
+    local choice
+    choice=$(dialog --backtitle "$DIALOG_BACKTITLE" \
+                   --title "Select Timezone" \
+                   --menu "Select your timezone:" \
+                   $DIALOG_HEIGHT $DIALOG_WIDTH 13 \
+                   "${zones[@]}" \
+                   2>&1 >/dev/tty)
+
+    [[ $? -eq 0 ]] && CONFIG[TIMEZONE]="$choice"
 }
 
-set_keymap() {
-    echo -e "\nAvailable keymaps:"
-    localectl list-keymaps | head -n 20
-    set_parameter KEYMAP "Enter keymap (e.g. us)" validate_keymap
+select_locale() {
+    # Create a list of locales
+    local locales=()
+    while IFS= read -r line; do
+        [[ "$line" =~ ^#?([a-z][a-z]_[A-Z][A-Z].*)$ ]] && \
+            locales+=("${BASH_REMATCH[1]}" "")
+    done < /etc/locale.gen
+
+    local choice
+    choice=$(dialog --backtitle "$DIALOG_BACKTITLE" \
+                   --title "Select Locale" \
+                   --menu "Select your locale:" \
+                   $DIALOG_HEIGHT $DIALOG_WIDTH 13 \
+                   "${locales[@]}" \
+                   2>&1 >/dev/tty)
+
+    [[ $? -eq 0 ]] && CONFIG[LOCALE]="$choice"
+}
+
+select_keymap() {
+    # Create a list of keymaps
+    local keymaps=()
+    while IFS= read -r keymap; do
+        keymaps+=("$keymap" "")
+    done < <(localectl list-keymaps)
+
+    local choice
+    choice=$(dialog --backtitle "$DIALOG_BACKTITLE" \
+                   --title "Select Keymap" \
+                   --menu "Select your keyboard layout:" \
+                   $DIALOG_HEIGHT $DIALOG_WIDTH 13 \
+                   "${keymaps[@]}" \
+                   2>&1 >/dev/tty)
+
+    [[ $? -eq 0 ]] && CONFIG[KEYMAP]="$choice"
+}
+
+set_username() {
+    while true; do
+        local value
+        value=$(dialog --backtitle "$DIALOG_BACKTITLE" \
+                      --title "Set Username" \
+                      --inputbox "Enter username:" \
+                      8 40 "${CONFIG[USERNAME]}" \
+                      2>&1 >/dev/tty)
+        
+        [[ $? -ne 0 ]] && return
+
+        if validate_username "$value"; then
+            CONFIG[USERNAME]="$value"
+            break
+        else
+            show_error "Invalid username format"
+        fi
+    done
 }
 
 toggle_sudo() {
-    CONFIG[ADD_SUDO]=$([ "${CONFIG[ADD_SUDO]}" == "yes" ] && echo "no" || echo "yes")
+    local choice
+    choice=$(dialog --backtitle "$DIALOG_BACKTITLE" \
+                   --title "Sudo Access" \
+                   --yes-label "Yes" \
+                   --no-label "No" \
+                   --yesno "Enable sudo access for user?" \
+                   8 40 \
+                   2>&1 >/dev/tty)
+    
+    [[ $? -eq 0 ]] && CONFIG[ADD_SUDO]="yes" || CONFIG[ADD_SUDO]="no"
 }
 
-set_microcode() {
-    echo -e "\n1. Auto-detect (${DETECTED[MICROCODE]})"
-    echo "2. Intel"
-    echo "3. AMD"
-    read -p "$(echo -e ${COLOR[CYAN]}"Select microcode: "${COLOR[NC]})" choice
-    case $choice in
-        1) CONFIG[MICROCODE]="auto" ;;
-        2) CONFIG[MICROCODE]="intel" ;;
-        3) CONFIG[MICROCODE]="amd" ;;
-        *) echo -e "${COLOR[RED]}Invalid selection!${COLOR[NC]}" ;;
-    esac
+select_microcode() {
+    local options=("auto" "Autodetect (${DETECTED[MICROCODE]})"
+                  "intel-ucode" "Intel CPU"
+                  "amd-ucode" "AMD CPU")
+
+    local choice
+    choice=$(dialog --backtitle "$DIALOG_BACKTITLE" \
+                   --title "Select Microcode" \
+                   --menu "Select CPU microcode:" \
+                   $DIALOG_HEIGHT $DIALOG_WIDTH 4 \
+                   "${options[@]}" \
+                   2>&1 >/dev/tty)
+
+    [[ $? -eq 0 ]] && CONFIG[MICROCODE]="$choice"
 }
 
-set_gpu_driver() {
-    echo -e "\n1. Auto-detect (${DETECTED[GPU_DRIVER]})"
-    echo "2. NVIDIA"
-    echo "3. AMD"
-    echo "4. Intel"
-    read -p "$(echo -e ${COLOR[CYAN]}"Select GPU driver: "${COLOR[NC]})" choice
-    case $choice in
-        1) CONFIG[GPU_DRIVER]="auto" ;;
-        2) CONFIG[GPU_DRIVER]="nvidia" ;;
-        3) CONFIG[GPU_DRIVER]="amdgpu" ;;
-        4) CONFIG[GPU_DRIVER]="i915" ;;
-        *) echo -e "${COLOR[RED]}Invalid selection!${COLOR[NC]}" ;;
-    esac
+select_gpu_driver() {
+    local options=("auto" "Autodetect (${DETECTED[GPU_DRIVER]})"
+                  "nvidia" "NVIDIA GPU"
+                  "amdgpu" "AMD GPU"
+                  "i915" "Intel GPU")
+
+    local choice
+    choice=$(dialog --backtitle "$DIALOG_BACKTITLE" \
+                   --title "Select GPU Driver" \
+                   --menu "Select GPU driver:" \
+                   $DIALOG_HEIGHT $DIALOG_WIDTH 5 \
+                   "${options[@]}" \
+                   2>&1 >/dev/tty)
+
+    [[ $? -eq 0 ]] && CONFIG[GPU_DRIVER]="$choice"
 }
 
-set_bootloader() {
-    echo -e "\n1. GRUB"
-    echo "2. systemd-boot"
-    read -p "$(echo -e ${COLOR[CYAN]}"Select bootloader: "${COLOR[NC]})" choice
-    case $choice in
-        1) CONFIG[BOOTLOADER]="grub" ;;
-        2) CONFIG[BOOTLOADER]="systemd-boot" ;;
-        *) echo -e "${COLOR[RED]}Invalid selection!${COLOR[NC]}" ;;
-    esac
+select_bootloader() {
+    local options=("grub" "GRUB bootloader"
+                  "systemd-boot" "systemd-boot")
+
+    local choice
+    choice=$(dialog --backtitle "$DIALOG_BACKTITLE" \
+                   --title "Select Bootloader" \
+                   --menu "Select bootloader:" \
+                   $DIALOG_HEIGHT $DIALOG_WIDTH 3 \
+                   "${options[@]}" \
+                   2>&1 >/dev/tty)
+
+    [[ $? -eq 0 ]] && CONFIG[BOOTLOADER]="$choice"
 }
 
 # -------------------------------
 # Installation Functions
 # -------------------------------
+start_installation() {
+    # Validate all parameters before starting
+    local errors=()
+    [[ -z "${CONFIG[DISK]}" ]] && errors+=("Disk not selected")
+    [[ -z "${CONFIG[USERNAME]}" ]] && errors+=("Username not set")
+    ! validate_disk_space && errors+=("Total partition size exceeds disk capacity")
+
+    if (( ${#errors[@]} > 0 )); then
+        local error_msg="Cannot start installation:\n\n"
+        for error in "${errors[@]}"; do
+            error_msg+="• $error\n"
+        done
+        show_error "$error_msg"
+        return 1
+    fi
+
+    # Show confirmation dialog
+    local confirm_msg="Please confirm the installation settings:\n\n"
+    confirm_msg+="Disk: ${CONFIG[DISK]} (${CONFIG[DISK_SIZE]}GB)\n"
+    confirm_msg+="Root Size: ${CONFIG[ROOT_SIZE]}GB\n"
+    confirm_msg+="Home Size: ${CONFIG[HOME_SIZE]}GB\n"
+    confirm_msg+="Swap Size: ${CONFIG[SWAP_SIZE]}GB\n"
+    confirm_msg+="Hostname: ${CONFIG[HOSTNAME]}\n"
+    confirm_msg+="Username: ${CONFIG[USERNAME]}\n"
+    confirm_msg+="\nWARNING: This will erase all data on ${CONFIG[DISK]}"
+
+    dialog --backtitle "$DIALOG_BACKTITLE" \
+           --title "Confirm Installation" \
+           --yesno "$confirm_msg" \
+           20 60 || return
+
+    # Start installation with progress bar
+    (
+        partition_disk 10
+        format_partitions 30
+        mount_partitions 40
+        install_base 60
+        configure_system 80
+        install_bootloader 90
+        finalize_installation 100
+    ) | dialog --backtitle "$DIALOG_BACKTITLE" \
+               --title "Installing" \
+               --gauge "Preparing installation..." \
+               8 60 0
+}
+
 partition_disk() {
+    local percent=$1
+    echo -e "XXX\n$percent\nPartitioning disk...\nXXX"
+    
     local disk="${CONFIG[DISK]}"
-    local part_prefix=$([[ "$disk" =~ nvme ]] && echo "p" || echo "")
-    
-    echo -e "\n${COLOR[YELLOW]}Partitioning disk...${COLOR[NC]}"
+    local part_prefix
+    [[ "$disk" =~ "nvme" ]] && part_prefix="p" || part_prefix=""
+
+    # Create partition table
     parted -s "$disk" mklabel gpt
-    parted -s "$disk" mkpart "EFI" fat32 1MiB ${UEFI_SIZE}MiB
+
+    # Calculate partition sizes in MB
+    local start=1
+    local end=$((start + UEFI_SIZE))
+    
+    # EFI partition
+    parted -s "$disk" mkpart "EFI" fat32 ${start}MiB ${end}MiB
     parted -s "$disk" set 1 esp on
-    parted -s "$disk" mkpart "ROOT" "$FS_TYPE" ${UEFI_SIZE}MiB "$((UEFI_SIZE + CONFIG[ROOT_SIZE] * 1024))MiB"
     
-    local next_start=$((UEFI_SIZE + CONFIG[ROOT_SIZE] * 1024))
+    # Root partition
+    start=$end
+    end=$((start + CONFIG[ROOT_SIZE] * 1024))
+    parted -s "$disk" mkpart "ROOT" ${start}MiB ${end}MiB
     
+    # Swap partition (if enabled)
     if (( CONFIG[SWAP_SIZE] > 0 )); then
-        parted -s "$disk" mkpart "SWAP" linux-swap "${next_start}MiB" "$((next_start + CONFIG[SWAP_SIZE] * 1024))MiB"
-        next_start=$((next_start + CONFIG[SWAP_SIZE] * 1024))
+        start=$end
+        end=$((start + CONFIG[SWAP_SIZE] * 1024))
+        parted -s "$disk" mkpart "SWAP" linux-swap ${start}MiB ${end}MiB
     fi
     
-    parted -s "$disk" mkpart "HOME" "$FS_TYPE" "${next_start}MiB" 100%
+    # Home partition
+    start=$end
+    end=$((start + CONFIG[HOME_SIZE] * 1024))
+    parted -s "$disk" mkpart "HOME" ${start}MiB ${end}MiB
 }
 
 format_partitions() {
+    local percent=$1
+    echo -e "XXX\n$percent\nFormatting partitions...\nXXX"
+    
     local disk="${CONFIG[DISK]}"
-    local part_prefix=$([[ "$disk" =~ nvme ]] && echo "p" || echo "")
+    local part_prefix
+    [[ "$disk" =~ "nvme" ]] && part_prefix="p" || part_prefix=""
     
-    echo -e "\n${COLOR[YELLOW]}Formatting partitions...${COLOR[NC]}"
+    # Format EFI partition
     mkfs.fat -F32 "${disk}${part_prefix}1"
-    mkfs.ext4 "${disk}${part_prefix}2"
     
+    # Format root partition
+    mkfs.ext4 -F "${disk}${part_prefix}2"
+    
+    # Format swap (if enabled)
     if (( CONFIG[SWAP_SIZE] > 0 )); then
         mkswap "${disk}${part_prefix}3"
         swapon "${disk}${part_prefix}3"
     fi
     
-    mkfs.ext4 "${disk}${part_prefix}$((CONFIG[SWAP_SIZE] > 0 ? 4 : 3))"
+    # Format home partition
+    mkfs.ext4 -F "${disk}${part_prefix}4"
 }
 
 mount_partitions() {
-    local disk="${CONFIG[DISK]}"
-    local part_prefix=$([[ "$disk" =~ nvme ]] && echo "p" || echo "")
+    local percent=$1
+    echo -e "XXX\n$percent\nMounting partitions...\nXXX"
     
-    echo -e "\n${COLOR[YELLOW]}Mounting partitions...${COLOR[NC]}"
+    local disk="${CONFIG[DISK]}"
+    local part_prefix
+    [[ "$disk" =~ "nvme" ]] && part_prefix="p" || part_prefix=""
+    
+    # Mount root
     mount "${disk}${part_prefix}2" /mnt
-    mkdir -p /mnt/boot
+    
+    # Create and mount other directories
+    mkdir -p /mnt/{boot,home}
     mount "${disk}${part_prefix}1" /mnt/boot
-    mkdir -p /mnt/home
-    mount "${disk}${part_prefix}$((CONFIG[SWAP_SIZE] > 0 ? 4 : 3))" /mnt/home
+    mount "${disk}${part_prefix}4" /mnt/home
 }
 
 install_base() {
-    echo -e "\n${COLOR[YELLOW]}Installing base system...${COLOR[NC]}"
-    pacstrap /mnt base base-devel linux linux-firmware
-}
-
-generate_fstab() {
-    echo -e "\n${COLOR[YELLOW]}Generating fstab...${COLOR[NC]}"
-    genfstab -U /mnt >> /mnt/etc/fstab
+    local percent=$1
+    echo -e "XXX\n$percent\nInstalling base system...\nXXX"
+    
+    # Install base packages
+    pacstrap /mnt base base-devel linux linux-firmware \
+        networkmanager sudo vim
 }
 
 configure_system() {
-    echo -e "\n${COLOR[YELLOW]}Configuring system...${COLOR[NC]}"
+    local percent=$1
+    echo -e "XXX\n$percent\nConfiguring system...\nXXX"
+    
+    # Generate fstab
+    genfstab -U /mnt >> /mnt/etc/fstab
+    
+    # Configure system
     arch-chroot /mnt /bin/bash <<EOF
+    # Set timezone
     ln -sf /usr/share/zoneinfo/${CONFIG[TIMEZONE]} /etc/localtime
     hwclock --systohc
     
+    # Set locale
     sed -i "s/^#${CONFIG[LOCALE]}/${CONFIG[LOCALE]}/" /etc/locale.gen
     locale-gen
     echo "LANG=${CONFIG[LOCALE]}" > /etc/locale.conf
+    
+    # Set keymap
     echo "KEYMAP=${CONFIG[KEYMAP]}" > /etc/vconsole.conf
+    
+    # Set hostname
     echo "${CONFIG[HOSTNAME]}" > /etc/hostname
     
-    # Add user
+    # Create user
     useradd -m -G wheel -s /bin/bash ${CONFIG[USERNAME]}
-    [[ "${CONFIG[ADD_SUDO]}" == "yes" ]] && sed -i 's/^# %wheel ALL=(ALL) ALL/%wheel ALL=(ALL) ALL/' /etc/sudoers
+    echo "${CONFIG[USERNAME]} ALL=(ALL) ALL" >> /etc/sudoers.d/10-${CONFIG[USERNAME]}
     
-    # Install bootloader
-    if [[ "${CONFIG[BOOTLOADER]}" == "grub" ]]; then
-        pacman -S --noconfirm grub efibootmgr
-        grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=GRUB
-        grub-mkconfig -o /boot/grub/grub.cfg
-    else
-        bootctl install
-        echo "default arch" > /boot/loader/loader.conf
-        echo "timeout 3" >> /boot/loader/loader.conf
-        echo "title Arch Linux" > /boot/loader/entries/arch.conf
-        echo "linux /vmlinuz-linux" >> /boot/loader/entries/arch.conf
-        echo "initrd /${CONFIG[MICROCODE]}.img" >> /boot/loader/entries/arch.conf
-        echo "initrd /initramfs-linux.img" >> /boot/loader/entries/arch.conf
-        echo "options root=PARTUUID=\$(blkid -s PARTUUID -o value ${CONFIG[DISK]}${part_prefix}2) rw" >> /boot/loader/entries/arch.conf
-    fi
-    
-    # Install drivers
-    case "${CONFIG[GPU_DRIVER]}" in
-        "nvidia") pacman -S --noconfirm nvidia ;;
-        "amdgpu") pacman -S --noconfirm xf86-video-amdgpu ;;
-        "i915") pacman -S --noconfirm xf86-video-intel ;;
-    esac
-    
-    # Install microcode
-    [[ "${CONFIG[MICROCODE]}" != "auto" ]] && pacman -S --noconfirm ${CONFIG[MICROCODE]}-ucode
+    # Enable services
+    systemctl enable NetworkManager
 EOF
 }
 
-start_installation() {
-    # Validate all parameters
-    for key in DISK ROOT_SIZE HOME_SIZE SWAP_SIZE HOSTNAME TIMEZONE LOCALE KEYMAP USERNAME; do
-        case $key in
-            DISK) validate_disk "${CONFIG[DISK]}" || die "Invalid disk configuration" ;;
-            ROOT_SIZE|HOME_SIZE|SWAP_SIZE) validate_size "${CONFIG[$key]}" || die "Invalid size for $key" ;;
-            HOSTNAME) validate_hostname "${CONFIG[HOSTNAME]}" || die "Invalid hostname" ;;
-            TIMEZONE) validate_timezone "${CONFIG[TIMEZONE]}" || die "Invalid timezone" ;;
-            LOCALE) validate_locale "${CONFIG[LOCALE]}" || die "Invalid locale" ;;
-            KEYMAP) validate_keymap "${CONFIG[KEYMAP]}" || die "Invalid keymap" ;;
-            USERNAME) validate_username "${CONFIG[USERNAME]}" || die "Invalid username" ;;
-        esac
-    done
+install_bootloader() {
+    local percent=$1
+    echo -e "XXX\n$percent\nInstalling bootloader...\nXXX"
     
-    validate_disk_space || die "Total partition sizes exceed disk capacity"
-    
-    # Start installation process
-    partition_disk
-    format_partitions
-    mount_partitions
-    install_base
-    generate_fstab
-    configure_system
-    
-    echo -e "\n${COLOR[GREEN]}Installation completed successfully!${COLOR[NC]}"
-    umount -R /mnt
-    exit 0
+    if [[ "${CONFIG[BOOTLOADER]}" == "grub" ]]; then
+        arch-chroot /mnt /bin/bash <<EOF
+        pacman -S --noconfirm grub efibootmgr
+        grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=GRUB
+        grub-mkconfig -o /boot/grub/grub.cfg
+EOF
+    else
+        arch-chroot /mnt /bin/bash <<EOF
+        bootctl install
+        echo "default arch" > /boot/loader/loader.conf
+        echo "timeout 3" >> /boot/loader/loader.conf
+        echo "editor 0" >> /boot/loader/loader.conf
+EOF
+    fi
+}
+
+finalize_installation() {
+    local percent=$1
+    echo -e "XXX\n$percent\nFinalizing installation...\nXXX"
+    sync
+    sleep 2
 }
 
 # -------------------------------
-# Initialization
+# Start Installation
 # -------------------------------
 detect_hardware
 main_menu
