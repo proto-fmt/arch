@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
-IFS=$'\n\t' 
+IFS=$'\n\t'
 
-# Colors definitions
+# Colors definitions using tput
 RED=$(tput setaf 1)
 GREEN=$(tput setaf 2)
 YELLOW=$(tput setaf 3)
 CYAN=$(tput setaf 6)
 NC=$(tput sgr0) # No Color
 
-# Initial configuration
+# Initial configuration variables
 DISK=""
 ROOT_SIZE=""
 SWAP_SIZE=0
@@ -20,20 +20,50 @@ LOCALE="en_US.UTF-8"
 KEYMAP="us"
 USERNAME=""
 MICROCODE=""
-GPU_DRIVER="none"
+GPU_DRIVER=""
 FS_TYPE="ext4"
 BOOTLOADER="grub"
 
-# Output functions
-error() { echo -e "${RED}[ERROR]${NC} $1" >&2; exit 1; }
+# Output helper functions
+error()   { echo -e "${RED}[ERROR]${NC} $1"; }
 warning() { echo -e "${YELLOW}[WARNING]${NC} $1"; }
-info() { echo -e "${GREEN}[INFO]${NC} $1"; }
-question() { echo -e "${CYAN}[?]${NC} $1"; }
+info()    { echo -e "${GREEN}[INFO]${NC} $1"; }
+question(){ echo -e "${CYAN}[?]${NC} $1"; }
 
-# Check root privileges and UEFI
+# Check that all required commands are available
+check_dependencies() {
+    local commands=("lsblk" "parted" "mkfs.fat" "pacstrap" "arch-chroot" "tput" "ping")
+    for cmd in "${commands[@]}"; do
+        if ! command -v "$cmd" &>/dev/null; then
+            error "Required command '$cmd' not found. Please install it before running the script."
+            exit 1
+        fi
+    done
+}
+
+# Function for confirming user's choice (yes/no)
+confirm() {
+    local prompt_message="$1"
+    while true; do
+        read -r -p "$(question "$prompt_message (y/N): ")" response
+        case "$response" in
+            [yY][eE][sS]|[yY]) return 0 ;;
+            [nN][oO]|[nN]|'') return 1 ;;
+            *) echo "Please answer yes or no." ;;
+        esac
+    done
+}
+
+# Check for root privileges and UEFI system
 check_system() {
-    [[ $EUID -eq 0 ]] || error "This script must be run as root!"
-    [[ -d /sys/firmware/efi ]] || error "This script only works with UEFI systems!"
+    if [[ $EUID -ne 0 ]]; then
+        error "This script must be run as root!"
+        exit 1
+    fi
+    if [[ ! -d /sys/firmware/efi ]]; then
+        error "This script only works with UEFI systems!"
+        exit 1
+    fi
 }
 
 # Check internet connection
@@ -41,85 +71,91 @@ check_internet() {
     info "Checking internet connection..."
     if ! ping -c 1 archlinux.org &>/dev/null; then
         error "No internet connection detected! Please connect and try again."
+        exit 1
     fi
 }
 
-# Detect hardware
+# Detect hardware (CPU microcode and GPU driver)
 detect_hardware() {
-    # CPU detection
+    # CPU microcode
     if grep -q "GenuineIntel" /proc/cpuinfo; then
         MICROCODE="intel-ucode"
     elif grep -q "AuthenticAMD" /proc/cpuinfo; then
         MICROCODE="amd-ucode"
     fi
 
-    # GPU detection
-    if lspci | grep -i "NVIDIA" >/dev/null; then
+    # GPU driver
+    if lspci | grep -qi "NVIDIA"; then
         GPU_DRIVER="nvidia"
-    elif lspci | grep -i "AMD" >/dev/null; then
+    elif lspci | grep -qi "AMD"; then
         GPU_DRIVER="amd"
-    elif lspci | grep -i "Intel" >/dev/null; then
+    elif lspci | grep -qi "Intel"; then
         GPU_DRIVER="intel"
     fi
 }
 
-# Main menu
+# Main interactive menu
 main_menu() {
-    clear
-    echo -e "\n${GREEN}Arch Linux UEFI Installer${NC}"
-    echo -e "=========================\n"
-    echo "1. Disk (${DISK:+${GREEN}${DISK}${NC}}${DISK:-${YELLOW}[ EMPTY ]${NC}})"
-    echo "2. Partition Configuration"
-    echo "3. System Settings"
-    echo "4. Start Installation"
-    echo -e "\n0. Exit"
-    
-    read -p "$(question "Enter your choice: ")" choice
-    case $choice in
-        1) select_disk;;
-        2) partition_menu;;
-        3) system_settings_menu;;
-        4) start_installation;;
-        0) exit 0;;
-        *) warning "Invalid option!"; sleep 1; main_menu;;
-    esac
+    while true; do
+        clear
+        echo -e "\n${GREEN}Arch Linux UEFI Installer${NC}"
+        echo -e "=========================\n"
+        echo "1. Disk (${DISK:+${GREEN}${DISK}${NC}}${DISK:-${YELLOW}[ EMPTY ]${NC}})"
+        echo "2. Partition Configuration"
+        echo "3. System Settings"
+        echo "4. Start Installation"
+        echo -e "\n0. Exit"
+        
+        read -r -p "$(question "Enter your choice: ")" choice
+        case $choice in
+            1) select_disk ;;
+            2) partition_menu ;;
+            3) system_settings_menu ;;
+            4) start_installation ;;
+            0) exit 0 ;;
+            *) warning "Invalid option!"; sleep 1 ;;
+        esac
+    done
 }
 
-# Disk selection
+# Disk selection function
 select_disk() {
     clear
     echo -e "\n${GREEN}Available disks:${NC}"
     lsblk -d -n -l -o NAME,SIZE,TYPE | grep -v 'loop\|rom'
     
-    read -p "$(question "Enter disk device (e.g. /dev/sda): ")" DISK
-    if [[ ! -b "$DISK" ]]; then
+    read -r -p "$(question "Enter disk device (e.g. /dev/sda): ")" input_disk
+    if [[ -b "$input_disk" ]]; then
+        DISK="$input_disk"
+    else
         warning "Invalid disk device!"
         DISK=""
         sleep 1
     fi
-    main_menu
 }
 
 # Partition configuration menu
 partition_menu() {
-    clear
-    echo -e "\n${GREEN}Partition Configuration${NC}"
-    echo -e "=========================\n"
-    echo "1. Root Size (${ROOT_SIZE:+${GREEN}${ROOT_SIZE}GB${NC}}${ROOT_SIZE:-${YELLOW}[ EMPTY ]${NC}})"
-    echo "2. Swap Size (${SWAP_SIZE:+${GREEN}${SWAP_SIZE}GB${NC}}${SWAP_SIZE:-${YELLOW}[ EMPTY ]${NC}})"
-    echo "3. Home Size (${HOME_SIZE:+${GREEN}${HOME_SIZE}GB${NC}}${HOME_SIZE:-${YELLOW}[ Remaining space ]${NC}})"
-    echo "4. Filesystem Type (${FS_TYPE:+${GREEN}${FS_TYPE}${NC}}${FS_TYPE:-${YELLOW}[ EMPTY ]${NC}})"
-    echo -e "\n0. Back"
-    
-    read -p "$(question "Enter your choice: ")" choice
-    case $choice in
-        1) set_root_size;;
-        2) set_swap_size;;
-        3) set_home_size;;
-        4) set_filesystem;;
-        0) main_menu;;
-        *) warning "Invalid option!"; sleep 1; partition_menu;;
-    esac
+    while true; do
+        clear
+        echo -e "\n${GREEN}Partition Configuration${NC}"
+        echo -e "=========================\n"
+        echo "1. Root Size (${ROOT_SIZE:+${GREEN}${ROOT_SIZE}GB${NC}}${ROOT_SIZE:-${YELLOW}[ EMPTY ]${NC}})"
+        echo "2. Swap Size (${SWAP_SIZE:+${GREEN}${SWAP_SIZE}GB${NC}}${SWAP_SIZE:-${YELLOW}[ EMPTY ]${NC}})"
+        echo "3. Home Size (${HOME_SIZE:+${GREEN}${HOME_SIZE}GB${NC}}${HOME_SIZE:-${YELLOW}[ Remaining space ]${NC}})"
+        echo "4. Filesystem Type (${FS_TYPE:+${GREEN}${FS_TYPE}${NC}})"
+        echo -e "\n0. Back"
+        
+        read -r -p "$(question "Enter your choice: ")" choice
+        case $choice in
+            1) set_root_size ;;
+            2) set_swap_size ;;
+            3) set_home_size ;;
+            4) set_filesystem ;;
+            0) break ;;
+            *) warning "Invalid option!"; sleep 1 ;;
+        esac
+    done
 }
 
 # Set filesystem type
@@ -130,113 +166,119 @@ set_filesystem() {
     echo "2. btrfs"
     echo "3. xfs"
     
-    read -p "$(question "Enter your choice: ")" choice
+    read -r -p "$(question "Enter your choice: ")" choice
     case $choice in
-        1) FS_TYPE="ext4";;
-        2) FS_TYPE="btrfs";;
-        3) FS_TYPE="xfs";;
-        *) warning "Invalid option! Using default ext4."; FS_TYPE="ext4";;
+        1) FS_TYPE="ext4" ;;
+        2) FS_TYPE="btrfs" ;;
+        3) FS_TYPE="xfs" ;;
+        *) warning "Invalid option! Using default ext4."; FS_TYPE="ext4" ;;
     esac
-    partition_menu
 }
 
 # Set partition sizes
 set_root_size() {
-    read -p "$(question "Enter root partition size in GB: ")" size
+    read -r -p "$(question "Enter root partition size in GB: ")" size
     if [[ "$size" =~ ^[0-9]+$ ]] && [ "$size" -gt 0 ]; then
         ROOT_SIZE=$size
     else
         warning "Invalid size! Please enter a positive number."
         sleep 1
     fi
-    partition_menu
 }
 
 set_swap_size() {
-    read -p "$(question "Enter swap partition size in GB (0 for no swap): ")" size
+    read -r -p "$(question "Enter swap partition size in GB (0 for no swap): ")" size
     if [[ "$size" =~ ^[0-9]+$ ]] && [ "$size" -ge 0 ]; then
         SWAP_SIZE=$size
     else
         warning "Invalid size! Please enter a non-negative number."
         sleep 1
     fi
-    partition_menu
 }
 
 set_home_size() {
-    read -p "$(question "Enter home partition size in GB (empty for remaining space): ")" size
+    read -r -p "$(question "Enter home partition size in GB (leave empty for remaining space): ")" size
     if [[ -z "$size" ]] || ([[ "$size" =~ ^[0-9]+$ ]] && [ "$size" -gt 0 ]); then
         HOME_SIZE=$size
     else
         warning "Invalid size! Please enter a positive number or leave empty."
         sleep 1
     fi
-    partition_menu
 }
 
 # System settings menu
 system_settings_menu() {
-    clear
-    echo -e "\n${GREEN}System Settings${NC}"
-    echo -e "================\n"
-    echo "1. Hostname (${HOSTNAME:+${GREEN}${HOSTNAME}${NC}}${HOSTNAME:-${YELLOW}[ EMPTY ]${NC}})"
-    echo "2. Timezone (${TIMEZONE:+${GREEN}${TIMEZONE}${NC}}${TIMEZONE:-${YELLOW}[ EMPTY ]${NC}})"
-    echo "3. Locale (${LOCALE:+${GREEN}${LOCALE}${NC}}${LOCALE:-${YELLOW}[ EMPTY ]${NC}})"
-    echo "4. Keymap (${KEYMAP:+${GREEN}${KEYMAP}${NC}}${KEYMAP:-${YELLOW}[ EMPTY ]${NC}})"
-    echo "5. Username (${USERNAME:+${GREEN}${USERNAME}${NC}}${USERNAME:-${YELLOW}[ EMPTY ]${NC}})"
-    echo "6. Bootloader (${BOOTLOADER:+${GREEN}${BOOTLOADER}${NC}}${BOOTLOADER:-${YELLOW}[ EMPTY ]${NC}})"
-    echo -e "\n0. Back"
-    
-    read -p "$(question "Enter your choice: ")" choice
-    case $choice in
-        1) read -p "$(question "Enter hostname: ")" HOSTNAME;;
-        2) read -p "$(question "Enter timezone (e.g. Europe/London): ")" TIMEZONE;;
-        3) read -p "$(question "Enter locale (e.g. en_US.UTF-8): ")" LOCALE;;
-        4) read -p "$(question "Enter keymap (e.g. us): ")" KEYMAP;;
-        5) read -p "$(question "Enter username: ")" USERNAME;;
-        6) set_bootloader;;
-        0) main_menu;;
-        *) warning "Invalid option!"; sleep 1;;
-    esac
-    system_settings_menu
+    while true; do
+        clear
+        echo -e "\n${GREEN}System Settings${NC}"
+        echo -e "================\n"
+        echo "1. Hostname (${HOSTNAME:+${GREEN}${HOSTNAME}${NC}})"
+        echo "2. Timezone (${TIMEZONE:+${GREEN}${TIMEZONE}${NC}})"
+        echo "3. Locale (${LOCALE:+${GREEN}${LOCALE}${NC}})"
+        echo "4. Keymap (${KEYMAP:+${GREEN}${KEYMAP}${NC}})"
+        echo "5. Username (${USERNAME:+${GREEN}${USERNAME}${NC}})"
+        echo "6. Bootloader (${BOOTLOADER:+${GREEN}${BOOTLOADER}${NC}})"
+        echo -e "\n0. Back"
+        
+        read -r -p "$(question "Enter your choice: ")" choice
+        case $choice in
+            1) read -r -p "$(question "Enter hostname: ")" HOSTNAME ;;
+            2) read -r -p "$(question "Enter timezone (e.g. Europe/London): ")" TIMEZONE ;;
+            3) read -r -p "$(question "Enter locale (e.g. en_US.UTF-8): ")" LOCALE ;;
+            4) read -r -p "$(question "Enter keymap (e.g. us): ")" KEYMAP ;;
+            5) read -r -p "$(question "Enter username: ")" USERNAME ;;
+            6) set_bootloader ;;
+            0) break ;;
+            *) warning "Invalid option!"; sleep 1 ;;
+        esac
+    done
 }
 
-# Set bootloader
+# Set bootloader selection
 set_bootloader() {
     clear
     echo -e "\n${GREEN}Select Bootloader${NC}"
     echo "1. GRUB"
     echo "2. systemd-boot"
     
-    read -p "$(question "Enter your choice: ")" choice
+    read -r -p "$(question "Enter your choice: ")" choice
     case $choice in
-        1) BOOTLOADER="grub";;
-        2) BOOTLOADER="systemd-boot";;
-        *) warning "Invalid option! Using default (GRUB)"; BOOTLOADER="grub";;
+        1) BOOTLOADER="grub" ;;
+        2) BOOTLOADER="systemd-boot" ;;
+        *) warning "Invalid option! Using default (GRUB)"; BOOTLOADER="grub" ;;
     esac
-    system_settings_menu
 }
 
 # Installation process
 start_installation() {
     clear
-    # Validate requirements
-    [[ -z "$DISK" ]] && error "Disk not selected!"
-    [[ -z "$ROOT_SIZE" ]] && error "Root size not configured!"
+    # Validate required configuration
+    if [[ -z "$DISK" ]]; then
+        error "Disk not selected!"
+        sleep 2
+        return
+    fi
+    if [[ -z "$ROOT_SIZE" ]]; then
+        error "Root size not configured!"
+        sleep 2
+        return
+    fi
+
     check_internet
+    check_dependencies
 
-    echo -e "\n${RED}WARNING: This will erase all data on ${DISK}!${NC}"
-    read -p "$(question "Are you sure you want to continue? (y/N): ")" confirm
-    [[ "$confirm" =~ [yY] ]] || main_menu
+    info "WARNING: This will erase all data on ${DISK}!"
+    if ! confirm "Are you sure you want to continue?"; then
+        main_menu
+        return
+    fi
 
-    # Detect hardware
     detect_hardware
 
-    # Determine partition prefix based on disk type
-    if [[ "$DISK" =~ "nvme" ]]; then
+    # Determine partition prefix for NVMe disks
+    local PART_PREFIX=""
+    if [[ "$DISK" =~ nvme ]]; then
         PART_PREFIX="p"
-    else
-        PART_PREFIX=""
     fi
 
     # Create partitions
@@ -279,69 +321,66 @@ start_installation() {
     # Install base system
     info "Installing base system..."
     pacstrap /mnt base base-devel linux linux-firmware linux-headers $MICROCODE \
-        networkmanager nano sudo
+             networkmanager nano sudo
 
-    # Install GPU drivers
+    # Install GPU drivers if detected
     case $GPU_DRIVER in
-        nvidia) pacstrap /mnt nvidia nvidia-utils nvidia-settings;;
-        amd) pacstrap /mnt xf86-video-amdgpu;;
-        intel) pacstrap /mnt xf86-video-intel;;
+        nvidia) pacstrap /mnt nvidia nvidia-utils nvidia-settings ;;
+        amd) pacstrap /mnt xf86-video-amdgpu ;;
+        intel) pacstrap /mnt xf86-video-intel ;;
     esac
 
     # Install bootloader packages
     case $BOOTLOADER in
-        grub) pacstrap /mnt grub efibootmgr;;
-        systemd-boot) pacstrap /mnt efibootmgr;;
+        grub) pacstrap /mnt grub efibootmgr ;;
+        systemd-boot) pacstrap /mnt efibootmgr ;;
     esac
 
     # Generate fstab
     info "Generating fstab..."
     genfstab -U /mnt >> /mnt/etc/fstab
 
-    # Configure system
+    # Configure system using chroot
     info "Configuring system..."
     arch-chroot /mnt /bin/bash <<EOF
-    # Basic setup
-    ln -sf /usr/share/zoneinfo/$TIMEZONE /etc/localtime
-    hwclock --systohc
-    echo "$LOCALE UTF-8" >> /etc/locale.gen
-    locale-gen
-    echo "LANG=$LOCALE" > /etc/locale.conf
-    echo "KEYMAP=$KEYMAP" > /etc/vconsole.conf
-    echo "$HOSTNAME" > /etc/hostname
-    
-    # Network setup
-    systemctl enable NetworkManager
-    
-    # Install and configure bootloader
-    case $BOOTLOADER in
-        grub)
-            grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=GRUB
-            grub-mkconfig -o /boot/grub/grub.cfg
-            ;;
-        systemd-boot)
-            bootctl install
-            echo "default arch" > /boot/loader/loader.conf
-            echo "timeout 3" >> /boot/loader/loader.conf
-            echo "title Arch Linux" > /boot/loader/entries/arch.conf
-            echo "linux /vmlinuz-linux" >> /boot/loader/entries/arch.conf
-            [[ -n "$MICROCODE" ]] && echo "initrd /${MICROCODE}.img" >> /boot/loader/entries/arch.conf
-            echo "initrd /initramfs-linux.img" >> /boot/loader/entries/arch.conf
-            echo "options root=UUID=$(blkid -s UUID -o value ${DISK}${PART_PREFIX}2) rw" >> /boot/loader/entries/arch.conf
-            ;;
-    esac
-    
-    # Set root password
-    echo "Set root password:"
-    passwd
+ln -sf /usr/share/zoneinfo/$TIMEZONE /etc/localtime
+hwclock --systohc
+echo "$LOCALE UTF-8" >> /etc/locale.gen
+locale-gen
+echo "LANG=$LOCALE" > /etc/locale.conf
+echo "KEYMAP=$KEYMAP" > /etc/vconsole.conf
+echo "$HOSTNAME" > /etc/hostname
+systemctl enable NetworkManager
 
-    # Create user if specified
-    if [[ -n "$USERNAME" ]]; then
-        useradd -m -G wheel -s /bin/bash "$USERNAME"
-        echo "Set password for $USERNAME:"
-        passwd "$USERNAME"
-        echo "%wheel ALL=(ALL:ALL) ALL" >> /etc/sudoers
-    fi
+# Install and configure bootloader
+case $BOOTLOADER in
+    grub)
+        grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=GRUB
+        grub-mkconfig -o /boot/grub/grub.cfg
+        ;;
+    systemd-boot)
+        bootctl install
+        echo "default arch" > /boot/loader/loader.conf
+        echo "timeout 3" >> /boot/loader/loader.conf
+        echo "title Arch Linux" > /boot/loader/entries/arch.conf
+        echo "linux /vmlinuz-linux" >> /boot/loader/entries/arch.conf
+        [[ -n "$MICROCODE" ]] && echo "initrd /${MICROCODE}.img" >> /boot/loader/entries/arch.conf
+        echo "initrd /initramfs-linux.img" >> /boot/loader/entries/arch.conf
+        echo "options root=UUID=\$(blkid -s UUID -o value ${DISK}${PART_PREFIX}2) rw" >> /boot/loader/entries/arch.conf
+        ;;
+esac
+
+# Set root password
+echo "Set root password:"
+passwd
+
+# Create additional user if username specified
+if [[ -n "$USERNAME" ]]; then
+    useradd -m -G wheel -s /bin/bash "$USERNAME"
+    echo "Set password for $USERNAME:"
+    passwd "$USERNAME"
+    echo "%wheel ALL=(ALL:ALL) ALL" >> /etc/sudoers
+fi
 EOF
 
     info "Installation complete!"
@@ -351,6 +390,6 @@ EOF
     exit 0
 }
 
-# Start script
+# Start the installation script
 check_system
 main_menu
