@@ -3,16 +3,16 @@ set -euo pipefail
 IFS=$'\n\t'
 
 # -------------------------------
-# Check for dialog and root
+# Check for whiptail and root
 # -------------------------------
 if [[ $EUID -ne 0 ]]; then
     echo "This script must be run as root"
     exit 1
 fi
 
-if ! command -v dialog >/dev/null; then
-    echo "Installing dialog..."
-    pacman -Sy --noconfirm dialog
+if ! command -v whiptail >/dev/null; then
+    echo "Installing whiptail..."
+    pacman -Sy --noconfirm libnewt
 fi
 
 # -------------------------------
@@ -45,10 +45,43 @@ declare -A DETECTED=(
 declare -r UEFI_SIZE=1024       # 1GB UEFI partition
 declare -r FS_TYPE="ext4"       # Filesystem type
 
-# Dialog settings
-declare -r DIALOG_BACKTITLE="Arch Linux Installer"
-declare -r DIALOG_HEIGHT=20
-declare -r DIALOG_WIDTH=70
+# Whiptail settings
+declare -r BACKTITLE="Arch Linux Installer"
+declare -r TERM_HEIGHT=24
+declare -r TERM_WIDTH=78
+declare -r MENU_HEIGHT=16
+
+# -------------------------------
+# Helper Functions
+# -------------------------------
+show_message() {
+    whiptail --backtitle "$BACKTITLE" \
+             --title "Message" \
+             --msgbox "$1" 8 60
+}
+
+show_error() {
+    whiptail --backtitle "$BACKTITLE" \
+             --title "Error" \
+             --msgbox "$1" 8 60
+}
+
+show_yesno() {
+    whiptail --backtitle "$BACKTITLE" \
+             --title "$1" \
+             --yesno "$2" 8 60
+}
+
+show_progress() {
+    {
+        for i in $(seq 1 100); do
+            echo $i
+            sleep 0.02
+        done
+    } | whiptail --backtitle "$BACKTITLE" \
+                 --title "Progress" \
+                 --gauge "$1" 8 60 0
+}
 
 # -------------------------------
 # Validation Functions
@@ -116,28 +149,6 @@ detect_hardware() {
 }
 
 # -------------------------------
-# Dialog Helper Functions
-# -------------------------------
-show_message() {
-    dialog --backtitle "$DIALOG_BACKTITLE" \
-           --title "Message" \
-           --msgbox "$1" 8 60
-}
-
-show_error() {
-    dialog --backtitle "$DIALOG_BACKTITLE" \
-           --title "Error" \
-           --colors \
-           --msgbox "\Z1$1\Zn" 8 60
-}
-
-show_progress() {
-    echo "$1" | dialog --backtitle "$DIALOG_BACKTITLE" \
-                       --title "Progress" \
-                       --gauge "$2" 8 60 0
-}
-
-# -------------------------------
 # Menu Functions
 # -------------------------------
 main_menu() {
@@ -152,27 +163,26 @@ main_menu() {
         [[ "$gpu_display" == "auto" ]] && gpu_display+=" (${DETECTED[GPU_DRIVER]})"
 
         local choice
-        choice=$(dialog --clear --backtitle "$DIALOG_BACKTITLE" \
-                       --title "Main Menu" \
-                       --colors \
-                       --menu "Select option to configure:" \
-                       $DIALOG_HEIGHT $DIALOG_WIDTH 13 \
-                       "1" "Disk: $disk_display" \
-                       "2" "Root Size: ${CONFIG[ROOT_SIZE]}GB" \
-                       "3" "Home Size: ${CONFIG[HOME_SIZE]}GB" \
-                       "4" "Swap Size: ${CONFIG[SWAP_SIZE]}GB" \
-                       "5" "Hostname: ${CONFIG[HOSTNAME]}" \
-                       "6" "Timezone: ${CONFIG[TIMEZONE]}" \
-                       "7" "Locale: ${CONFIG[LOCALE]}" \
-                       "8" "Keymap: ${CONFIG[KEYMAP]}" \
-                       "9" "Username: ${CONFIG[USERNAME]:-[NOT SET]}" \
-                       "10" "Sudo Access: ${CONFIG[ADD_SUDO]}" \
-                       "11" "Microcode: $microcode_display" \
-                       "12" "GPU Driver: $gpu_display" \
-                       "13" "Bootloader: ${CONFIG[BOOTLOADER]}" \
-                       "i" "Start Installation" \
-                       "q" "Exit" \
-                       2>&1 >/dev/tty)
+        choice=$(whiptail --backtitle "$BACKTITLE" \
+                         --title "Main Menu" \
+                         --menu "Select option to configure:" \
+                         $TERM_HEIGHT $TERM_WIDTH $MENU_HEIGHT \
+                         "1" "Disk: $disk_display" \
+                         "2" "Root Size: ${CONFIG[ROOT_SIZE]}GB" \
+                         "3" "Home Size: ${CONFIG[HOME_SIZE]}GB" \
+                         "4" "Swap Size: ${CONFIG[SWAP_SIZE]}GB" \
+                         "5" "Hostname: ${CONFIG[HOSTNAME]}" \
+                         "6" "Timezone: ${CONFIG[TIMEZONE]}" \
+                         "7" "Locale: ${CONFIG[LOCALE]}" \
+                         "8" "Keymap: ${CONFIG[KEYMAP]}" \
+                         "9" "Username: ${CONFIG[USERNAME]:-[NOT SET]}" \
+                         "10" "Sudo Access: ${CONFIG[ADD_SUDO]}" \
+                         "11" "Microcode: $microcode_display" \
+                         "12" "GPU Driver: $gpu_display" \
+                         "13" "Bootloader: ${CONFIG[BOOTLOADER]}" \
+                         "i" "Start Installation" \
+                         "q" "Exit" \
+                         3>&1 1>&2 2>&3)
 
         case $choice in
             1) select_disk ;;
@@ -203,16 +213,18 @@ select_disk() {
     local menu_items=()
     
     for disk in "${disks[@]}"; do
-        menu_items+=("/dev/$(echo $disk | awk '{print $1}')" "$(echo $disk | awk '{print $2}')")
+        local name="/dev/$(echo $disk | awk '{print $1}')"
+        local size="$(echo $disk | awk '{print $2}')"
+        menu_items+=("$name" "$size")
     done
 
     local choice
-    choice=$(dialog --backtitle "$DIALOG_BACKTITLE" \
-                   --title "Select Disk" \
-                   --menu "Available disks:" \
-                   $DIALOG_HEIGHT $DIALOG_WIDTH 10 \
-                   "${menu_items[@]}" \
-                   2>&1 >/dev/tty)
+    choice=$(whiptail --backtitle "$BACKTITLE" \
+                     --title "Select Disk" \
+                     --menu "Available disks:" \
+                     $TERM_HEIGHT $TERM_WIDTH $MENU_HEIGHT \
+                     "${menu_items[@]}" \
+                     3>&1 1>&2 2>&3)
 
     if [[ -n "$choice" ]]; then
         CONFIG[DISK]="$choice"
@@ -226,11 +238,11 @@ set_size() {
     
     while true; do
         local value
-        value=$(dialog --backtitle "$DIALOG_BACKTITLE" \
-                      --title "Set $key" \
-                      --inputbox "$prompt" \
-                      8 40 "${CONFIG[$key]}" \
-                      2>&1 >/dev/tty)
+        value=$(whiptail --backtitle "$BACKTITLE" \
+                        --title "Set $key" \
+                        --inputbox "$prompt" \
+                        8 60 "${CONFIG[$key]}" \
+                        3>&1 1>&2 2>&3)
         
         [[ $? -ne 0 ]] && return
 
@@ -250,11 +262,11 @@ set_size() {
 set_hostname() {
     while true; do
         local value
-        value=$(dialog --backtitle "$DIALOG_BACKTITLE" \
-                      --title "Set Hostname" \
-                      --inputbox "Enter hostname:" \
-                      8 40 "${CONFIG[HOSTNAME]}" \
-                      2>&1 >/dev/tty)
+        value=$(whiptail --backtitle "$BACKTITLE" \
+                        --title "Set Hostname" \
+                        --inputbox "Enter hostname:" \
+                        8 60 "${CONFIG[HOSTNAME]}" \
+                        3>&1 1>&2 2>&3)
         
         [[ $? -ne 0 ]] && return
 
@@ -271,75 +283,114 @@ set_hostname() {
 # Special Parameter Selection Functions
 # -------------------------------
 select_timezone() {
-    # Create a list of timezones
-    local zones=()
-    while IFS= read -r zone; do
-        zones+=("$zone" "")
-    done < <(find /usr/share/zoneinfo/ -type f -not -path '*right*' -not -path '*posix*' \
-             | cut -d/ -f5- | sort | grep -v "^posix/" | grep -v "^right/")
+    # First, select region
+    local regions=()
+    while IFS= read -r region; do
+        [[ -d "/usr/share/zoneinfo/$region" ]] && regions+=("$region" "")
+    done < <(find /usr/share/zoneinfo -mindepth 1 -maxdepth 1 -type d -printf "%f\n" | sort)
 
-    local choice
-    choice=$(dialog --backtitle "$DIALOG_BACKTITLE" \
-                   --title "Select Timezone" \
-                   --menu "Select your timezone:" \
-                   $DIALOG_HEIGHT $DIALOG_WIDTH 13 \
-                   "${zones[@]}" \
-                   2>&1 >/dev/tty)
+    local region
+    region=$(whiptail --backtitle "$BACKTITLE" \
+                     --title "Select Region" \
+                     --menu "Select your region:" \
+                     $TERM_HEIGHT $TERM_WIDTH $MENU_HEIGHT \
+                     "${regions[@]}" \
+                     3>&1 1>&2 2>&3)
+    
+    [[ $? -ne 0 ]] && return
 
-    [[ $? -eq 0 ]] && CONFIG[TIMEZONE]="$choice"
+    # Then select city
+    local cities=()
+    while IFS= read -r city; do
+        cities+=("$city" "")
+    done < <(find "/usr/share/zoneinfo/$region" -type f -printf "%f\n" | sort)
+
+    local city
+    city=$(whiptail --backtitle "$BACKTITLE" \
+                   --title "Select City" \
+                   --menu "Select your city:" \
+                   $TERM_HEIGHT $TERM_WIDTH $MENU_HEIGHT \
+                   "${cities[@]}" \
+                   3>&1 1>&2 2>&3)
+    
+    [[ $? -eq 0 ]] && CONFIG[TIMEZONE]="$region/$city"
 }
 
 select_locale() {
-    # Create a list of locales
     local locales=()
     while IFS= read -r line; do
-        [[ "$line" =~ ^#?([a-z][a-z]_[A-Z][A-Z].*)$ ]] && \
-            locales+=("${BASH_REMATCH[1]}" "")
+        if [[ "$line" =~ ^#?([a-z][a-z]_[A-Z][A-Z].*)$ ]]; then
+            local locale="${BASH_REMATCH[1]}"
+            locales+=("$locale" "")
+        fi
     done < /etc/locale.gen
 
     local choice
-    choice=$(dialog --backtitle "$DIALOG_BACKTITLE" \
-                   --title "Select Locale" \
-                   --menu "Select your locale:" \
-                   $DIALOG_HEIGHT $DIALOG_WIDTH 13 \
-                   "${locales[@]}" \
-                   2>&1 >/dev/tty)
-
+    choice=$(whiptail --backtitle "$BACKTITLE" \
+                     --title "Select Locale" \
+                     --menu "Select your locale:" \
+                     $TERM_HEIGHT $TERM_WIDTH $MENU_HEIGHT \
+                     "${locales[@]}" \
+                     3>&1 1>&2 2>&3)
+    
     [[ $? -eq 0 ]] && CONFIG[LOCALE]="$choice"
 }
 
 select_keymap() {
-    # Create a list of keymaps
     local keymaps=()
     while IFS= read -r keymap; do
         keymaps+=("$keymap" "")
     done < <(localectl list-keymaps)
 
     local choice
-    choice=$(dialog --backtitle "$DIALOG_BACKTITLE" \
-                   --title "Select Keymap" \
-                   --menu "Select your keyboard layout:" \
-                   $DIALOG_HEIGHT $DIALOG_WIDTH 13 \
-                   "${keymaps[@]}" \
-                   2>&1 >/dev/tty)
-
+    choice=$(whiptail --backtitle "$BACKTITLE" \
+                     --title "Select Keymap" \
+                     --menu "Select your keyboard layout:" \
+                     $TERM_HEIGHT $TERM_WIDTH $MENU_HEIGHT \
+                     "${keymaps[@]}" \
+                     3>&1 1>&2 2>&3)
+    
     [[ $? -eq 0 ]] && CONFIG[KEYMAP]="$choice"
 }
 
 set_username() {
     while true; do
         local value
-        value=$(dialog --backtitle "$DIALOG_BACKTITLE" \
-                      --title "Set Username" \
-                      --inputbox "Enter username:" \
-                      8 40 "${CONFIG[USERNAME]}" \
-                      2>&1 >/dev/tty)
+        value=$(whiptail --backtitle "$BACKTITLE" \
+                        --title "Set Username" \
+                        --inputbox "Enter username:" \
+                        8 60 "${CONFIG[USERNAME]}" \
+                        3>&1 1>&2 2>&3)
         
         [[ $? -ne 0 ]] && return
 
         if validate_username "$value"; then
             CONFIG[USERNAME]="$value"
-            break
+            # Ask for password
+            local password
+            password=$(whiptail --backtitle "$BACKTITLE" \
+                              --title "Set Password" \
+                              --passwordbox "Enter password for $value:" \
+                              8 60 \
+                              3>&1 1>&2 2>&3)
+            
+            [[ $? -ne 0 ]] && return
+            
+            local password2
+            password2=$(whiptail --backtitle "$BACKTITLE" \
+                               --title "Confirm Password" \
+                               --passwordbox "Confirm password:" \
+                               8 60 \
+                               3>&1 1>&2 2>&3)
+            
+            [[ $? -ne 0 ]] && return
+            
+            if [[ "$password" == "$password2" ]]; then
+                CONFIG[USER_PASSWORD]="$password"
+                break
+            else
+                show_error "Passwords do not match!"
+            fi
         else
             show_error "Invalid username format"
         fi
@@ -347,63 +398,69 @@ set_username() {
 }
 
 toggle_sudo() {
-    local choice
-    choice=$(dialog --backtitle "$DIALOG_BACKTITLE" \
-                   --title "Sudo Access" \
-                   --yes-label "Yes" \
-                   --no-label "No" \
-                   --yesno "Enable sudo access for user?" \
-                   8 40 \
-                   2>&1 >/dev/tty)
-    
-    [[ $? -eq 0 ]] && CONFIG[ADD_SUDO]="yes" || CONFIG[ADD_SUDO]="no"
+    if whiptail --backtitle "$BACKTITLE" \
+                --title "Sudo Access" \
+                --yesno "Enable sudo access for user?" \
+                8 60; then
+        CONFIG[ADD_SUDO]="yes"
+    else
+        CONFIG[ADD_SUDO]="no"
+    fi
 }
 
 select_microcode() {
-    local options=("auto" "Autodetect (${DETECTED[MICROCODE]})"
-                  "intel-ucode" "Intel CPU"
-                  "amd-ucode" "AMD CPU")
+    local options=(
+        "auto" "Autodetect (${DETECTED[MICROCODE]})"
+        "intel-ucode" "Intel CPU"
+        "amd-ucode" "AMD CPU"
+        "none" "No microcode updates"
+    )
 
     local choice
-    choice=$(dialog --backtitle "$DIALOG_BACKTITLE" \
-                   --title "Select Microcode" \
-                   --menu "Select CPU microcode:" \
-                   $DIALOG_HEIGHT $DIALOG_WIDTH 4 \
-                   "${options[@]}" \
-                   2>&1 >/dev/tty)
-
+    choice=$(whiptail --backtitle "$BACKTITLE" \
+                     --title "Select Microcode" \
+                     --menu "Select CPU microcode:" \
+                     $TERM_HEIGHT $TERM_WIDTH $MENU_HEIGHT \
+                     "${options[@]}" \
+                     3>&1 1>&2 2>&3)
+    
     [[ $? -eq 0 ]] && CONFIG[MICROCODE]="$choice"
 }
 
 select_gpu_driver() {
-    local options=("auto" "Autodetect (${DETECTED[GPU_DRIVER]})"
-                  "nvidia" "NVIDIA GPU"
-                  "amdgpu" "AMD GPU"
-                  "i915" "Intel GPU")
+    local options=(
+        "auto" "Autodetect (${DETECTED[GPU_DRIVER]})"
+        "nvidia" "NVIDIA GPU"
+        "amdgpu" "AMD GPU"
+        "i915" "Intel GPU"
+        "none" "No GPU driver"
+    )
 
     local choice
-    choice=$(dialog --backtitle "$DIALOG_BACKTITLE" \
-                   --title "Select GPU Driver" \
-                   --menu "Select GPU driver:" \
-                   $DIALOG_HEIGHT $DIALOG_WIDTH 5 \
-                   "${options[@]}" \
-                   2>&1 >/dev/tty)
-
+    choice=$(whiptail --backtitle "$BACKTITLE" \
+                     --title "Select GPU Driver" \
+                     --menu "Select GPU driver:" \
+                     $TERM_HEIGHT $TERM_WIDTH $MENU_HEIGHT \
+                     "${options[@]}" \
+                     3>&1 1>&2 2>&3)
+    
     [[ $? -eq 0 ]] && CONFIG[GPU_DRIVER]="$choice"
 }
 
 select_bootloader() {
-    local options=("grub" "GRUB bootloader"
-                  "systemd-boot" "systemd-boot")
+    local options=(
+        "grub" "GRUB bootloader"
+        "systemd-boot" "systemd-boot"
+    )
 
     local choice
-    choice=$(dialog --backtitle "$DIALOG_BACKTITLE" \
-                   --title "Select Bootloader" \
-                   --menu "Select bootloader:" \
-                   $DIALOG_HEIGHT $DIALOG_WIDTH 3 \
-                   "${options[@]}" \
-                   2>&1 >/dev/tty)
-
+    choice=$(whiptail --backtitle "$BACKTITLE" \
+                     --title "Select Bootloader" \
+                     --menu "Select bootloader:" \
+                     $TERM_HEIGHT $TERM_WIDTH $MENU_HEIGHT \
+                     "${options[@]}" \
+                     3>&1 1>&2 2>&3)
+    
     [[ $? -eq 0 ]] && CONFIG[BOOTLOADER]="$choice"
 }
 
@@ -422,44 +479,67 @@ start_installation() {
         for error in "${errors[@]}"; do
             error_msg+="• $error\n"
         done
-        show_error "$error_msg"
+        whiptail --backtitle "$BACKTITLE" \
+                 --title "Error" \
+                 --msgbox "$error_msg" 12 60
         return 1
     fi
 
     # Show confirmation dialog
-    local confirm_msg="Please confirm the installation settings:\n\n"
+    local confirm_msg="Please review your installation settings:\n\n"
     confirm_msg+="Disk: ${CONFIG[DISK]} (${CONFIG[DISK_SIZE]}GB)\n"
     confirm_msg+="Root Size: ${CONFIG[ROOT_SIZE]}GB\n"
     confirm_msg+="Home Size: ${CONFIG[HOME_SIZE]}GB\n"
     confirm_msg+="Swap Size: ${CONFIG[SWAP_SIZE]}GB\n"
     confirm_msg+="Hostname: ${CONFIG[HOSTNAME]}\n"
     confirm_msg+="Username: ${CONFIG[USERNAME]}\n"
-    confirm_msg+="\nWARNING: This will erase all data on ${CONFIG[DISK]}"
+    confirm_msg+="Timezone: ${CONFIG[TIMEZONE]}\n"
+    confirm_msg+="Locale: ${CONFIG[LOCALE]}\n"
+    confirm_msg+="Keymap: ${CONFIG[KEYMAP]}\n"
+    confirm_msg+="Sudo Access: ${CONFIG[ADD_SUDO]}\n"
+    confirm_msg+="Microcode: ${CONFIG[MICROCODE]}\n"
+    confirm_msg+="GPU Driver: ${CONFIG[GPU_DRIVER]}\n"
+    confirm_msg+="Bootloader: ${CONFIG[BOOTLOADER]}\n\n"
+    confirm_msg+="WARNING: This will erase all data on ${CONFIG[DISK]}"
 
-    dialog --backtitle "$DIALOG_BACKTITLE" \
-           --title "Confirm Installation" \
-           --yesno "$confirm_msg" \
-           20 60 || return
+    if ! whiptail --backtitle "$BACKTITLE" \
+                  --title "Confirm Installation" \
+                  --yesno "$confirm_msg" 24 70; then
+        return 1
+    fi
 
-    # Start installation with progress bar
+    # Installation steps with progress bar
     (
-        partition_disk 10
-        format_partitions 30
-        mount_partitions 40
-        install_base 60
-        configure_system 80
-        install_bootloader 90
-        finalize_installation 100
-    ) | dialog --backtitle "$DIALOG_BACKTITLE" \
-               --title "Installing" \
-               --gauge "Preparing installation..." \
-               8 60 0
+        show_progress "Partitioning disk..." 10
+        partition_disk
+        
+        show_progress "Formatting partitions..." 20
+        format_partitions
+        
+        show_progress "Mounting partitions..." 30
+        mount_partitions
+        
+        show_progress "Installing base system..." 40
+        install_base
+        
+        show_progress "Configuring system..." 60
+        configure_system
+        
+        show_progress "Installing bootloader..." 80
+        install_bootloader
+        
+        show_progress "Finalizing installation..." 90
+        finalize_installation
+        
+        show_progress "Installation complete!" 100
+        sleep 2
+    ) | whiptail --backtitle "$BACKTITLE" \
+                 --title "Installing" \
+                 --gauge "Preparing installation..." \
+                 8 70 0
 }
 
 partition_disk() {
-    local percent=$1
-    echo -e "XXX\n$percent\nPartitioning disk...\nXXX"
-    
     local disk="${CONFIG[DISK]}"
     local part_prefix
     [[ "$disk" =~ "nvme" ]] && part_prefix="p" || part_prefix=""
@@ -494,9 +574,6 @@ partition_disk() {
 }
 
 format_partitions() {
-    local percent=$1
-    echo -e "XXX\n$percent\nFormatting partitions...\nXXX"
-    
     local disk="${CONFIG[DISK]}"
     local part_prefix
     [[ "$disk" =~ "nvme" ]] && part_prefix="p" || part_prefix=""
@@ -518,9 +595,6 @@ format_partitions() {
 }
 
 mount_partitions() {
-    local percent=$1
-    echo -e "XXX\n$percent\nMounting partitions...\nXXX"
-    
     local disk="${CONFIG[DISK]}"
     local part_prefix
     [[ "$disk" =~ "nvme" ]] && part_prefix="p" || part_prefix=""
@@ -535,18 +609,26 @@ mount_partitions() {
 }
 
 install_base() {
-    local percent=$1
-    echo -e "XXX\n$percent\nInstalling base system...\nXXX"
-    
     # Install base packages
     pacstrap /mnt base base-devel linux linux-firmware \
         networkmanager sudo vim
+        
+    # Install microcode if selected
+    if [[ "${CONFIG[MICROCODE]}" != "none" ]]; then
+        local microcode="${CONFIG[MICROCODE]}"
+        [[ "$microcode" == "auto" ]] && microcode="${DETECTED[MICROCODE]}"
+        pacstrap /mnt "$microcode"
+    fi
+    
+    # Install GPU driver if selected
+    if [[ "${CONFIG[GPU_DRIVER]}" != "none" ]]; then
+        local driver="${CONFIG[GPU_DRIVER]}"
+        [[ "$driver" == "auto" ]] && driver="${DETECTED[GPU_DRIVER]}"
+        pacstrap /mnt "$driver"
+    fi
 }
 
 configure_system() {
-    local percent=$1
-    echo -e "XXX\n$percent\nConfiguring system...\nXXX"
-    
     # Generate fstab
     genfstab -U /mnt >> /mnt/etc/fstab
     
@@ -567,9 +649,15 @@ configure_system() {
     # Set hostname
     echo "${CONFIG[HOSTNAME]}" > /etc/hostname
     
-    # Create user
+    # Create user and set password
     useradd -m -G wheel -s /bin/bash ${CONFIG[USERNAME]}
-    echo "${CONFIG[USERNAME]} ALL=(ALL) ALL" >> /etc/sudoers.d/10-${CONFIG[USERNAME]}
+    echo "${CONFIG[USERNAME]}:${CONFIG[USER_PASSWORD]}" | chpasswd
+    
+    # Configure sudo access
+    if [[ "${CONFIG[ADD_SUDO]}" == "yes" ]]; then
+        echo "${CONFIG[USERNAME]} ALL=(ALL) ALL" > /etc/sudoers.d/10-${CONFIG[USERNAME]}
+        chmod 440 /etc/sudoers.d/10-${CONFIG[USERNAME]}
+    fi
     
     # Enable services
     systemctl enable NetworkManager
@@ -577,9 +665,6 @@ EOF
 }
 
 install_bootloader() {
-    local percent=$1
-    echo -e "XXX\n$percent\nInstalling bootloader...\nXXX"
-    
     if [[ "${CONFIG[BOOTLOADER]}" == "grub" ]]; then
         arch-chroot /mnt /bin/bash <<EOF
         pacman -S --noconfirm grub efibootmgr
@@ -597,8 +682,6 @@ EOF
 }
 
 finalize_installation() {
-    local percent=$1
-    echo -e "XXX\n$percent\nFinalizing installation...\nXXX"
     sync
     sleep 2
 }
