@@ -14,11 +14,12 @@ DISK=""
 ROOT_SIZE=""
 SWAP_SIZE=0
 HOME_SIZE=""
-HOSTNAME="archlinux"
-TIMEZONE="UTC"
-LOCALE="en_US.UTF-8"
-KEYMAP="us"
+HOSTNAME=""
+TIMEZONE=""
+LOCALE=""
+KEYMAP=""
 USERNAME=""
+ADD_SUDO="yes"  # Значение по умолчанию: добавлять пользователя в sudo
 MICROCODE=""
 GPU_DRIVER=""
 FS_TYPE="ext4"
@@ -26,7 +27,7 @@ BOOTLOADER="grub"
 
 # Output helper functions
 error()   { echo -e "${RED}[ERROR]${NC} $1"; }
-warning() { echo -e "${YELLOW}[WARNING]${NC} $1"; }
+warning() { echo -e "${RED}[WARNING]${NC} $1"; }
 info()    { echo -e "${GREEN}[INFO]${NC} $1"; }
 question(){ echo -e "${CYAN}[?]${NC} $1"; }
 
@@ -100,7 +101,7 @@ main_menu() {
         clear
         echo -e "\n${GREEN}Arch Linux UEFI Installer${NC}"
         echo -e "=========================\n"
-        echo "1. Disk (${DISK:+${GREEN}${DISK}${NC}}${DISK:-${YELLOW}[ EMPTY ]${NC}})"
+        echo "1. Disk (${DISK:+${GREEN}${DISK}${NC}}${DISK:-${RED}[ EMPTY ]${NC}})"
         echo "2. Partition Configuration"
         echo "3. System Settings"
         echo "4. Start Installation"
@@ -140,10 +141,10 @@ partition_menu() {
         clear
         echo -e "\n${GREEN}Partition Configuration${NC}"
         echo -e "=========================\n"
-        echo "1. Root Size (${ROOT_SIZE:+${GREEN}${ROOT_SIZE}GB${NC}}${ROOT_SIZE:-${YELLOW}[ EMPTY ]${NC}})"
-        echo "2. Swap Size (${SWAP_SIZE:+${GREEN}${SWAP_SIZE}GB${NC}}${SWAP_SIZE:-${YELLOW}[ EMPTY ]${NC}})"
-        echo "3. Home Size (${HOME_SIZE:+${GREEN}${HOME_SIZE}GB${NC}}${HOME_SIZE:-${YELLOW}[ Remaining space ]${NC}})"
-        echo "4. Filesystem Type (${FS_TYPE:+${GREEN}${FS_TYPE}${NC}})"
+        echo "1. Root Size (${ROOT_SIZE:+${GREEN}${ROOT_SIZE}GB${NC}}${ROOT_SIZE:-${RED}[ EMPTY ]${NC}})"
+        echo "2. Swap Size (${SWAP_SIZE:+${GREEN}${SWAP_SIZE}GB${NC}}${SWAP_SIZE:-${RED}[ EMPTY ]${NC}})"
+        echo "3. Home Size (${HOME_SIZE:+${GREEN}${HOME_SIZE}GB${NC}}${HOME_SIZE:-${RED}[ EMPTY ]${NC}})"
+        echo "4. Filesystem Type (${FS_TYPE:+${GREEN}${FS_TYPE}${NC}}${FS_TYPE:-${RED}[ EMPTY ]${NC}})"
         echo -e "\n0. Back"
         
         read -r -p "$(question "Enter your choice: ")" choice
@@ -212,12 +213,13 @@ system_settings_menu() {
         clear
         echo -e "\n${GREEN}System Settings${NC}"
         echo -e "================\n"
-        echo "1. Hostname (${HOSTNAME:+${GREEN}${HOSTNAME}${NC}})"
-        echo "2. Timezone (${TIMEZONE:+${GREEN}${TIMEZONE}${NC}})"
-        echo "3. Locale (${LOCALE:+${GREEN}${LOCALE}${NC}})"
-        echo "4. Keymap (${KEYMAP:+${GREEN}${KEYMAP}${NC}})"
-        echo "5. Username (${USERNAME:+${GREEN}${USERNAME}${NC}})"
-        echo "6. Bootloader (${BOOTLOADER:+${GREEN}${BOOTLOADER}${NC}})"
+        echo "1. Hostname (${HOSTNAME:+${GREEN}${HOSTNAME}${NC}}${HOSTNAME:-${RED}[ EMPTY ]${NC}})"
+        echo "2. Timezone (${TIMEZONE:+${GREEN}${TIMEZONE}${NC}}${TIMEZONE:-${RED}[ EMPTY ]${NC}})"
+        echo "3. Locale (${LOCALE:+${GREEN}${LOCALE}${NC}}${LOCALE:-${RED}[ EMPTY ]${NC}})"
+        echo "4. Keymap (${KEYMAP:+${GREEN}${KEYMAP}${NC}}${KEYMAP:-${RED}[ EMPTY ]${NC}})"
+        echo "5. Username (${USERNAME:+${GREEN}${USERNAME}${NC}}${USERNAME:-${RED}[ EMPTY ]${NC}})"
+        echo "6. Bootloader (${BOOTLOADER:+${GREEN}${BOOTLOADER}${NC}}${BOOTLOADER:-${RED}[ EMPTY ]${NC}})"
+        echo "7. Grant sudo rights ($( [[ "$ADD_SUDO" == "yes" ]] && echo "${GREEN}Yes${NC}" || echo "${RED}No${NC}" )) )"
         echo -e "\n0. Back"
         
         read -r -p "$(question "Enter your choice: ")" choice
@@ -228,6 +230,7 @@ system_settings_menu() {
             4) read -r -p "$(question "Enter keymap (e.g. us): ")" KEYMAP ;;
             5) read -r -p "$(question "Enter username: ")" USERNAME ;;
             6) set_bootloader ;;
+            7) set_sudo_rights ;;
             0) break ;;
             *) warning "Invalid option!"; sleep 1 ;;
         esac
@@ -246,6 +249,16 @@ set_bootloader() {
         1) BOOTLOADER="grub" ;;
         2) BOOTLOADER="systemd-boot" ;;
         *) warning "Invalid option! Using default (GRUB)"; BOOTLOADER="grub" ;;
+    esac
+}
+
+# Set sudo rights setting for the user
+set_sudo_rights() {
+    read -r -p "$(question "Should the user be added to sudoers? (yes/no): ")" response
+    case "$response" in
+        [yY][eE][sS]|[yY]) ADD_SUDO="yes" ;;
+        [nN][oO]|[nN]) ADD_SUDO="no" ;;
+        *) warning "Invalid option! Keeping previous setting: $ADD_SUDO" ;;
     esac
 }
 
@@ -343,17 +356,17 @@ start_installation() {
     # Configure system using chroot
     info "Configuring system..."
     arch-chroot /mnt /bin/bash <<EOF
-ln -sf /usr/share/zoneinfo/$TIMEZONE /etc/localtime
+ln -sf /usr/share/zoneinfo/${TIMEZONE:-UTC} /etc/localtime
 hwclock --systohc
-echo "$LOCALE UTF-8" >> /etc/locale.gen
+echo "${LOCALE:-en_US.UTF-8} UTF-8" >> /etc/locale.gen
 locale-gen
-echo "LANG=$LOCALE" > /etc/locale.conf
-echo "KEYMAP=$KEYMAP" > /etc/vconsole.conf
-echo "$HOSTNAME" > /etc/hostname
+echo "LANG=${LOCALE:-en_US.UTF-8}" > /etc/locale.conf
+echo "KEYMAP=${KEYMAP:-us}" > /etc/vconsole.conf
+echo "${HOSTNAME:-archlinux}" > /etc/hostname
 systemctl enable NetworkManager
 
 # Install and configure bootloader
-case $BOOTLOADER in
+case ${BOOTLOADER} in
     grub)
         grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=GRUB
         grub-mkconfig -o /boot/grub/grub.cfg
@@ -379,7 +392,9 @@ if [[ -n "$USERNAME" ]]; then
     useradd -m -G wheel -s /bin/bash "$USERNAME"
     echo "Set password for $USERNAME:"
     passwd "$USERNAME"
-    echo "%wheel ALL=(ALL:ALL) ALL" >> /etc/sudoers
+    if [[ "$ADD_SUDO" == "yes" ]]; then
+        echo "%wheel ALL=(ALL:ALL) ALL" >> /etc/sudoers
+    fi
 fi
 EOF
 
